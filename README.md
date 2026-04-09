@@ -26,7 +26,7 @@ Easiest way to start use dbt-greenplum is to install it using pip
 Where `<version>` is same as your dbt version
 
 Available versions:
- - 0.4.0
+ - 0.5.0
 
 ## `exchange_partition` incremental strategy
 
@@ -47,11 +47,8 @@ if target does not exist:
     ├── if target exists but is NOT partitioned → compile-time error
     │
     ▼
-DROP staging IF EXISTS  (idempotency on re-run after failure)
-    │
-    ▼
-CREATE staging table  (one per run, schema: exchange_stage_schema)
-    │                  name: <exchange_stage_schema>.__stage_<model>
+dbt creates a temporary staging table with the model SQL result
+    │   (standard dbt incremental mechanism, heap table in the session temp schema)
     ▼
 for each period in DISTINCT(staging.partition_key):   ← only periods with data
     ├── ADD PARTITION (if missing)
@@ -63,7 +60,7 @@ for each period in DISTINCT(staging.partition_key):   ← only periods with data
     └── DROP swap table
     │
     ▼
-DROP staging table
+dbt drops the temporary staging table automatically (end of session)
 ANALYZE target  (if exchange_analyze=true)
 ```
 
@@ -82,11 +79,8 @@ if target does not exist:
     ├── if target exists but is NOT partitioned → compile-time error
     │
     ▼
-DROP staging IF EXISTS  (idempotency on re-run after failure)
-    │
-    ▼
-CREATE staging table  (one per run, schema: exchange_stage_schema)
-    │                  name: <exchange_stage_schema>.__stage_<model>
+dbt creates a temporary staging table with the model SQL result
+    │   (standard dbt incremental mechanism, heap table in the session temp schema)
     ▼
 for each period in DISTINCT(staging.partition_key):   ← only periods with data
     ├── ADD PARTITION (if missing)
@@ -99,7 +93,7 @@ for each period in DISTINCT(staging.partition_key):   ← only periods with data
     └── DROP swap table
     │
     ▼
-DROP staging table
+dbt drops the temporary staging table automatically (end of session)
 ANALYZE target  (if exchange_analyze=true)
 ```
 
@@ -227,7 +221,7 @@ where event_date >= date_trunc('month', current_date - interval '1 month')
 - The target table **must be a range-partitioned table**. If a non-partitioned table with the same name already exists, the strategy raises a compile-time error. Drop it manually before the first run.
 - `exchange_stage_schema` must exist in the database before the first run. The strategy does not create it automatically.
 - Swap tables are named `__swap_{model_name}_{YYYYMMDD}` (day) or `__swap_{model_name}_{YYYYMM}` (month) and are always dropped after a successful exchange. If a run is interrupted they will be cleaned up on the next run. **Model name must not exceed 47 characters** (day granularity) or **49 characters** (month granularity) — Greenplum enforces a 63-character limit on identifiers, and the swap table name prefix `__swap_` (7 chars) plus date suffix `_YYYYMMDD` (9 chars) or `_YYYYMM` (7 chars) consumes the rest.
-- Staging tables are named `__stage_{model_name}` and live in `exchange_stage_schema`. They are also dropped after a successful run.
+- The staging table is a standard dbt temporary table created by the incremental materialization before the strategy is called. It lives in the session temp schema and is dropped automatically at the end of the session. It is **not** created in `exchange_stage_schema`.
 - `WITHOUT VALIDATION` (`exchange_allow_with_validation=false`) skips Greenplum's constraint check during the exchange. Use it only when you are certain the swap table data satisfies the partition constraints.
 - The strategy processes only partition periods that are **actually present in the staging data**. Periods with no new data are never touched, so existing partition data for those periods is preserved as-is.
 
@@ -236,11 +230,11 @@ where event_date >= date_trunc('month', current_date - interval '1 month')
 | Table | Schema | Example name |
 |---|---|---|
 | **target** (partitioned) | model schema (`profiles.yml` / `dbt_project.yml`) | `marts.orders` |
-| **staging** | `exchange_stage_schema` | `stage.__stage_orders` |
+| **staging** | session temp schema (managed by dbt) | `pg_temp.orders__dbt_tmp` |
 | **swap** (day) | `exchange_stage_schema` | `stage.__swap_orders_20240101` |
 | **swap** (month) | `exchange_stage_schema` | `stage.__swap_orders_202401` |
 
-Staging and swap tables are **temporary** — they are dropped at the end of each run. The `exchange_stage_schema` schema must exist in the database before the first run.
+The staging table is a standard dbt temp table — created automatically before the strategy runs and dropped at the end of the session. Swap tables live in `exchange_stage_schema` and are dropped immediately after each partition exchange. The `exchange_stage_schema` schema must exist in the database before the first run.
 
 ## Auto-creation of the partitioned table
 
@@ -343,37 +337,15 @@ PARTITION BY RANGE (event_date) (
     EVERY (INTERVAL '1 day')
 );
 
--- Idempotency: drop staging left from a previous failed run
-DROP TABLE IF EXISTS stage.__stage_orders;
-
--- Create staging (one per run)
-CREATE TABLE stage.__stage_orders (
-  "id" bigint,
-  "event_date" date,
-  "user_id" integer,
-  "amount" numeric(18,4),
-  "loaded_at" timestamp
-)
-WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
-DISTRIBUTED BY (id);
-
-INSERT INTO stage.__stage_orders (
-    SELECT
-        id,
-        event_date::date AS event_date,
-        user_id,
-        amount,
-        current_timestamp::timestamp AS loaded_at
-    FROM orders
-    WHERE event_date::date BETWEEN '2026-01-01'::date AND '2026-01-02'::date
-);
+-- dbt creates a temp staging table automatically (heap, session temp schema):
+-- CREATE TEMP TABLE orders__dbt_tmp AS ( <model SQL> ) DISTRIBUTED BY (id);
 
 -- For each period in delta:
 CREATE TABLE stage.__swap_orders_20260101
 WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
 AS
 SELECT id, event_date, user_id, amount, loaded_at
-FROM stage.__stage_orders
+FROM orders__dbt_tmp
 WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
 DISTRIBUTED BY (id);
 
@@ -383,8 +355,7 @@ ALTER TABLE marts.orders
 
 DROP TABLE stage.__swap_orders_20260101;
 
--- Final cleanup
-DROP TABLE stage.__stage_orders;
+-- dbt drops the temp staging table automatically at end of session
 
 ANALYZE marts.orders;
 ```
@@ -430,31 +401,8 @@ When `id` matches, delta rows win. Target rows not present in the delta are pres
 
 Generated SQL (incremental run, one partition period):
 ```sql
--- Idempotency: drop staging left from a previous failed run
-DROP TABLE IF EXISTS stage.__stage_orders;
-
--- Create staging (one per run)
-CREATE TABLE stage.__stage_orders (
-  "id" bigint,
-  "event_date" date,
-  "user_id" integer,
-  "amount" numeric(18,4),
-  "loaded_at" timestamp
-)
-WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
-DISTRIBUTED BY (id);
-
-INSERT INTO stage.__stage_orders (
-    SELECT
-        id,
-        event_date::date AS event_date,
-        user_id,
-        amount,
-        current_timestamp::timestamp AS loaded_at
-    FROM orders
-    WHERE updated_at BETWEEN '2026-01-01 00:00:00'::timestamp
-                          AND '2026-01-02 00:00:00'::timestamp
-);
+-- dbt creates a temp staging table automatically (heap, session temp schema):
+-- CREATE TEMP TABLE orders__dbt_tmp AS ( <model SQL> ) DISTRIBUTED BY (id);
 
 -- For each period in delta:
 CREATE TABLE stage.__swap_orders_20260101
@@ -462,7 +410,7 @@ WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel
 AS
 -- delta rows (always included, win on key conflict)
 SELECT id, event_date, user_id, amount, loaded_at
-FROM stage.__stage_orders
+FROM orders__dbt_tmp
 WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
 
 UNION ALL
@@ -473,7 +421,7 @@ FROM marts.orders __trg
 WHERE date_trunc('day', __trg.event_date::timestamptz) = DATE '2026-01-01'
   AND NOT EXISTS (
       SELECT 1
-      FROM stage.__stage_orders __delta
+      FROM orders__dbt_tmp __delta
       WHERE date_trunc('day', __delta.event_date::timestamptz) = DATE '2026-01-01'
         AND __trg."id" = __delta."id"
   )
@@ -485,8 +433,7 @@ ALTER TABLE marts.orders
 
 DROP TABLE stage.__swap_orders_20260101;
 
--- Final cleanup
-DROP TABLE stage.__stage_orders;
+-- dbt drops the temp staging table automatically at end of session
 
 ANALYZE marts.orders;
 ```
@@ -545,32 +492,13 @@ PARTITION BY RANGE (event_date) (
     EVERY (INTERVAL '1 day')
 );
 
-DROP TABLE IF EXISTS stage.__stage_orders;
-
-CREATE TABLE stage.__stage_orders (
-  "id" bigint,
-  "event_date" date,
-  "user_id" integer,
-  "amount" numeric(18,4),
-  "loaded_at" timestamp
-)
-DISTRIBUTED BY (id);
-
-INSERT INTO stage.__stage_orders (
-    SELECT
-        id,
-        event_date::date AS event_date,
-        user_id,
-        amount,
-        current_timestamp::timestamp AS loaded_at
-    FROM orders
-    WHERE event_date::date BETWEEN '2026-01-01'::date AND '2026-01-02'::date
-);
+-- dbt creates a temp staging table automatically (heap, session temp schema):
+-- CREATE TEMP TABLE orders__dbt_tmp AS ( <model SQL> ) DISTRIBUTED BY (id);
 
 CREATE TABLE stage.__swap_orders_20260101
 AS
 SELECT id, event_date, user_id, amount, loaded_at
-FROM stage.__stage_orders
+FROM orders__dbt_tmp
 WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
 DISTRIBUTED BY (id);
 
@@ -579,7 +507,9 @@ ALTER TABLE marts.orders
   WITH TABLE stage.__swap_orders_20260101;
 
 DROP TABLE stage.__swap_orders_20260101;
-DROP TABLE stage.__stage_orders;
+
+-- dbt drops the temp staging table automatically at end of session
+
 ANALYZE marts.orders;
 ```
 
@@ -618,43 +548,25 @@ WHERE updated_at BETWEEN '{{ var("start_dttm") }}'::timestamp
 
 Generated SQL (incremental run, one partition period):
 ```sql
-DROP TABLE IF EXISTS stage.__stage_orders;
-
-CREATE TABLE stage.__stage_orders (
-  "id" bigint,
-  "event_date" date,
-  "user_id" integer,
-  "amount" numeric(18,4),
-  "loaded_at" timestamp
-)
-DISTRIBUTED BY (id);
-
-INSERT INTO stage.__stage_orders (
-    SELECT
-        id,
-        event_date::date AS event_date,
-        user_id,
-        amount,
-        current_timestamp::timestamp AS loaded_at
-    FROM orders
-    WHERE updated_at BETWEEN '2026-01-01 00:00:00'::timestamp
-                          AND '2026-01-02 00:00:00'::timestamp
-);
+-- dbt creates a temp staging table automatically (heap, session temp schema):
+-- CREATE TEMP TABLE orders__dbt_tmp AS ( <model SQL> ) DISTRIBUTED BY (id);
 
 CREATE TABLE stage.__swap_orders_20260101
 AS
+-- delta rows (always included, win on key conflict)
 SELECT id, event_date, user_id, amount, loaded_at
-FROM stage.__stage_orders
+FROM orders__dbt_tmp
 WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
 
 UNION ALL
 
+-- target rows not present in delta by merge key (preserved)
 SELECT id, event_date, user_id, amount, loaded_at
 FROM marts.orders __trg
 WHERE date_trunc('day', __trg.event_date::timestamptz) = DATE '2026-01-01'
   AND NOT EXISTS (
       SELECT 1
-      FROM stage.__stage_orders __delta
+      FROM orders__dbt_tmp __delta
       WHERE date_trunc('day', __delta.event_date::timestamptz) = DATE '2026-01-01'
         AND __trg."id" = __delta."id"
   )
@@ -665,7 +577,9 @@ ALTER TABLE marts.orders
   WITH TABLE stage.__swap_orders_20260101;
 
 DROP TABLE stage.__swap_orders_20260101;
-DROP TABLE stage.__stage_orders;
+
+-- dbt drops the temp staging table automatically at end of session
+
 ANALYZE marts.orders;
 ```
 

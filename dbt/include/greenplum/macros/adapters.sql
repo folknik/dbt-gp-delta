@@ -90,7 +90,9 @@
       {%- elif unlogged -%}
         unlogged
       {%- endif %} table {{ relation }}
+      {% if not temporary %}
       {{ storage_parameters(appendoptimized, blocksize, orientation, compresstype, compresslevel) }}
+      {% endif %}
       as (
         {{ sql }}
       )

@@ -65,7 +65,7 @@ def _get_package_version():
 
 
 # dbt version this adapter is built and tested against.
-# Update this when upgrading the base dbt-gp dependency.
+# Update this when upgrading the base dbt-postgres dependency.
 DBT_VERSION = "1.8.0"
 
 package_name = "dbt-gp-delta"
