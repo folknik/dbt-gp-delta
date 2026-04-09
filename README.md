@@ -105,14 +105,6 @@ ANALYZE target  (if exchange_analyze=true)
 
 When `merge_keys` match, **delta rows take priority** — target rows whose key matches a delta row are dropped via `NOT EXISTS`. Target rows that are **not** present in the delta by key are **preserved**. Duplicates within the delta itself are **not deduplicated automatically** — if the delta contains multiple rows with the same `merge_key`, all of them will appear in the result. Deduplicate the delta in the model SQL if needed.
 
-**Why `NOT EXISTS` instead of `ROW_NUMBER()`:**
-
-`ROW_NUMBER()` would require an extra wrapping step: `UNION ALL` both sources → number rows per merge key → filter `WHERE rn = 1`. That adds two unnecessary steps and a more complex query plan. `NOT EXISTS` directly expresses the intent ("target rows that are not in the delta"), short-circuits on the first match, and behaves correctly regardless of whether the distribution key overlaps with the merge key.
-
-When to use merge mode:
-- The delta contains only new or changed rows, not a full source snapshot.
-- Historical rows that no longer exist in the source must be preserved in the target.
-
 #### Required model config
 
 | Parameter | Type | Description |
