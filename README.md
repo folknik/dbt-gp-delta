@@ -14,9 +14,9 @@
 
 dbt is the T in ELT. Organize, cleanse, denormalize, filter, rename, and pre-aggregate the raw data in your warehouse so that it's ready for analysis.
 
-## dbt-greenplum
+## dbt-gp-delta
 
-The `dbt-greenplum` package contains the code enabling dbt to work with Greenplum. This adapter based on [postgres-adapter](https://github.com/dbt-labs/dbt-core/blob/main/plugins/postgres/dbt/include/postgres/profile_template.yml) with a bit difference for a greenplum specific features
+The `dbt-gp-delta` package contains the code enabling dbt to work with Greenplum. It is based on [dbt-gp](https://github.com/vladimir-bm/dbt-gp) — a Greenplum adapter built on top of the [postgres-adapter](https://github.com/dbt-labs/dbt-core/blob/main/plugins/postgres/dbt/include/postgres/profile_template.yml) — and extends it with the `exchange_partition` incremental strategy without modifying any of the original functionality.
 
 ## Installation
 
