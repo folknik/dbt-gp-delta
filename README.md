@@ -28,7 +28,7 @@ Where `<version>` is same as your dbt version
 Available versions:
  - 0.1.0
 
-### `exchange_partition` incremental strategy
+## `exchange_partition` incremental strategy
 
 The `exchange_partition` strategy implements atomic, partition-level incremental loads using Greenplum's `EXCHANGE PARTITION` DDL operation. Instead of inserting rows into the live table, it builds a separate swap table for each affected partition period and atomically replaces the partition via a metadata-only operation — no physical data movement occurs.
 
@@ -112,6 +112,7 @@ When `merge_keys` match, **delta rows take priority** — target rows whose key 
 | `exchange_partition_key` | string | Column used as the partition key. Must be castable to `timestamptz`. |
 | `exchange_stage_schema` | string | Schema where staging and swap tables are created. Must exist in the database. |
 | `exchange_merge_partitions` | bool | `true` — merge new rows with existing partition data (requires `unique_key`). `false` — fully overwrite affected partitions with staging data. |
+| `contract: enforced: true` | — | Declared in `schema.yml` (not in `config()`). Column types are required because the target table is created via explicit DDL, not CTAS. The strategy raises a compile-time error if the contract is not enforced. |
 
 #### Optional model config
 
@@ -246,7 +247,7 @@ Staging and swap tables are **temporary** — they are dropped at the end of eac
 On the first run the strategy automatically creates the target table as a `PARTITION BY RANGE` table — in both overwrite and merge modes:
 
 - Column definitions are taken from the **model contract** (`schema.yml` with `contract: enforced: true` and `data_type` on each column).
-- The initial partition is created starting from `exchange_initial_partition_start_at`. Further partitions are added on demand via `ALTER TABLE ... ADD PARTITION`.
+- The initial partition range is defined by `exchange_initial_partition_start_at` and `exchange_initial_partition_end_at`. If `exchange_initial_partition_end_at` is omitted, a single partition of one period (one day or one month) is created. Further partitions are added on demand via `ALTER TABLE ... ADD PARTITION`.
 - Partition step: `EVERY (INTERVAL '1 day')` or `EVERY (INTERVAL '1 month')` — controlled by `exchange_partition_granularity`.
 - Distribution: `DISTRIBUTED BY (<distributed_by>)` or `DISTRIBUTED RANDOMLY` if `distributed_by` is not set.
 
@@ -345,18 +346,26 @@ PARTITION BY RANGE (event_date) (
 DROP TABLE IF EXISTS stage.__stage_orders;
 
 -- Create staging (one per run)
-CREATE TABLE stage.__stage_orders
+CREATE TABLE stage.__stage_orders (
+  "id" bigint,
+  "event_date" date,
+  "user_id" integer,
+  "amount" numeric(18,4),
+  "loaded_at" timestamp
+)
 WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
-AS
-SELECT
-    id,
-    event_date::date AS event_date,
-    user_id,
-    amount,
-    current_timestamp::timestamp AS loaded_at
-FROM orders
-WHERE event_date::date BETWEEN '2026-01-01'::date AND '2026-01-02'::date
 DISTRIBUTED BY (id);
+
+INSERT INTO stage.__stage_orders (
+    SELECT
+        id,
+        event_date::date AS event_date,
+        user_id,
+        amount,
+        current_timestamp::timestamp AS loaded_at
+    FROM orders
+    WHERE event_date::date BETWEEN '2026-01-01'::date AND '2026-01-02'::date
+);
 
 -- For each period in delta:
 CREATE TABLE stage.__swap_orders_20260101
@@ -424,19 +433,27 @@ Generated SQL (incremental run, one partition period):
 DROP TABLE IF EXISTS stage.__stage_orders;
 
 -- Create staging (one per run)
-CREATE TABLE stage.__stage_orders
+CREATE TABLE stage.__stage_orders (
+  "id" bigint,
+  "event_date" date,
+  "user_id" integer,
+  "amount" numeric(18,4),
+  "loaded_at" timestamp
+)
 WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
-AS
-SELECT
-    id,
-    event_date::date AS event_date,
-    user_id,
-    amount,
-    current_timestamp::timestamp AS loaded_at
-FROM orders
-WHERE updated_at BETWEEN '2026-01-01 00:00:00'::timestamp
-                      AND '2026-01-02 00:00:00'::timestamp
 DISTRIBUTED BY (id);
+
+INSERT INTO stage.__stage_orders (
+    SELECT
+        id,
+        event_date::date AS event_date,
+        user_id,
+        amount,
+        current_timestamp::timestamp AS loaded_at
+    FROM orders
+    WHERE updated_at BETWEEN '2026-01-01 00:00:00'::timestamp
+                          AND '2026-01-02 00:00:00'::timestamp
+);
 
 -- For each period in delta:
 CREATE TABLE stage.__swap_orders_20260101
@@ -528,17 +545,25 @@ PARTITION BY RANGE (event_date) (
 
 DROP TABLE IF EXISTS stage.__stage_orders;
 
-CREATE TABLE stage.__stage_orders
-AS
-SELECT
-    id,
-    event_date::date AS event_date,
-    user_id,
-    amount,
-    current_timestamp::timestamp AS loaded_at
-FROM orders
-WHERE event_date::date BETWEEN '2026-01-01'::date AND '2026-01-02'::date
+CREATE TABLE stage.__stage_orders (
+  "id" bigint,
+  "event_date" date,
+  "user_id" integer,
+  "amount" numeric(18,4),
+  "loaded_at" timestamp
+)
 DISTRIBUTED BY (id);
+
+INSERT INTO stage.__stage_orders (
+    SELECT
+        id,
+        event_date::date AS event_date,
+        user_id,
+        amount,
+        current_timestamp::timestamp AS loaded_at
+    FROM orders
+    WHERE event_date::date BETWEEN '2026-01-01'::date AND '2026-01-02'::date
+);
 
 CREATE TABLE stage.__swap_orders_20260101
 AS
@@ -593,18 +618,26 @@ Generated SQL (incremental run, one partition period):
 ```sql
 DROP TABLE IF EXISTS stage.__stage_orders;
 
-CREATE TABLE stage.__stage_orders
-AS
-SELECT
-    id,
-    event_date::date AS event_date,
-    user_id,
-    amount,
-    current_timestamp::timestamp AS loaded_at
-FROM orders
-WHERE updated_at BETWEEN '2026-01-01 00:00:00'::timestamp
-                      AND '2026-01-02 00:00:00'::timestamp
+CREATE TABLE stage.__stage_orders (
+  "id" bigint,
+  "event_date" date,
+  "user_id" integer,
+  "amount" numeric(18,4),
+  "loaded_at" timestamp
+)
 DISTRIBUTED BY (id);
+
+INSERT INTO stage.__stage_orders (
+    SELECT
+        id,
+        event_date::date AS event_date,
+        user_id,
+        amount,
+        current_timestamp::timestamp AS loaded_at
+    FROM orders
+    WHERE updated_at BETWEEN '2026-01-01 00:00:00'::timestamp
+                          AND '2026-01-02 00:00:00'::timestamp
+);
 
 CREATE TABLE stage.__swap_orders_20260101
 AS
