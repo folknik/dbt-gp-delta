@@ -112,7 +112,6 @@ When `merge_keys` match, **delta rows take priority** — target rows whose key 
 | `exchange_partition_key` | string | Column used as the partition key. Must be castable to `timestamptz`. |
 | `exchange_stage_schema` | string | Schema where staging and swap tables are created. Must exist in the database. |
 | `exchange_merge_partitions` | bool | `true` — merge new rows with existing partition data (requires `unique_key`). `false` — fully overwrite affected partitions with staging data. |
-| `contract: enforced: true` | — | Column definitions must be declared in `schema.yml`. Required because the table is created with an explicit DDL rather than CTAS. |
 
 #### Optional model config
 
