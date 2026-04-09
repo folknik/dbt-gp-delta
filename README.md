@@ -16,22 +16,17 @@ dbt is the T in ELT. Organize, cleanse, denormalize, filter, rename, and pre-agg
 
 ## dbt-gp-delta
 
-The `dbt-gp-delta` package contains the code enabling dbt to work with Greenplum. It is based on [dbt-gp](https://github.com/vladimir-bm/dbt-gp) — a Greenplum adapter built on top of the [postgres-adapter](https://github.com/dbt-labs/dbt-core/blob/main/plugins/postgres/dbt/include/postgres/profile_template.yml) — and extends it with the `exchange_partition` incremental strategy without modifying any of the original functionality.
+The `dbt-gp-delta` package contains the code enabling dbt to work with Greenplum. It is based on [dbt-gp](https://github.com/vladimir-bm/dbt-gp) - a Greenplum adapter built on top of the [postgres-adapter](https://github.com/dbt-labs/dbt-core/blob/main/plugins/postgres/dbt/include/postgres/profile_template.yml) - and extends it with the `exchange_partition` incremental strategy without modifying any of the original functionality.
 
 ## Installation
 
 Easiest way to start use dbt-greenplum is to install it using pip
-`pip install dbt-greenplum==<version>`
+`pip install dbt-gp-delta==<version>`
 
 Where `<version>` is same as your dbt version
 
 Available versions:
- - 0.19.2
- - 1.0.4
- - 1.2.0
- - 1.4.0
- - 1.5.0
- - 1.8.0
+ - 0.1.0
 
 ## Supported Features
 
