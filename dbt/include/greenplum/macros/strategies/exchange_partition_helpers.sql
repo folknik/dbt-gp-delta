@@ -358,7 +358,7 @@
 
     {%- set join_parts = [] -%}
     {%- for key in merge_keys -%}
-      {%- do join_parts.append('__tgt.' ~ adapter.quote(key) ~ ' = __delta.' ~ adapter.quote(key)) -%}
+      {%- do join_parts.append('__trg.' ~ adapter.quote(key) ~ ' = __delta.' ~ adapter.quote(key)) -%}
     {%- endfor -%}
     {%- set join_cond = join_parts | join(' AND ') -%}
 
@@ -373,8 +373,8 @@
       UNION ALL
 
       SELECT {{ col_list }}
-      FROM {{ target_relation }} __tgt
-      WHERE date_trunc('{{ granularity }}', __tgt.{{ partition_key }}::timestamptz) = DATE '{{ date_str }}'
+      FROM {{ target_relation }} __trg
+      WHERE date_trunc('{{ granularity }}', __trg.{{ partition_key }}::timestamptz) = DATE '{{ date_str }}'
         AND NOT EXISTS (
             SELECT 1
             FROM {{ source_relation }} __delta
