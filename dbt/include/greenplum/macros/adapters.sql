@@ -79,9 +79,14 @@
     ;
 
     {# INSERTING DATA #}
+    {# For exchange_partition tables: skip INSERT on initial creation — the table is
+       created empty, and data will be loaded by the exchange_partition strategy
+       on subsequent incremental runs. #}
+    {%- if exchange_partition_key is none -%}
     insert into {{ relation }} (
         {{ sql }}
     );
+    {%- endif -%}
 
   {% else %}
 
