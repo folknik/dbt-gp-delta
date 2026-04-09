@@ -230,6 +230,30 @@ where event_date >= date_trunc('month', current_date - interval '1 month')
 - `WITHOUT VALIDATION` (`exchange_allow_with_validation=false`) skips Greenplum's constraint check during the exchange. Use it only when you are certain the swap table data satisfies the partition constraints.
 - The strategy processes only partition periods that are **actually present in the staging data**. Periods with no new data are never touched, so existing partition data for those periods is preserved as-is.
 
+## Table naming
+
+| Table | Schema | Example name |
+|---|---|---|
+| **target** (partitioned) | model schema (`profiles.yml` / `dbt_project.yml`) | `marts.orders` |
+| **staging** | `exchange_stage_schema` | `stage.__stage_orders` |
+| **swap** (day) | `exchange_stage_schema` | `stage.__swap_orders_20240101` |
+| **swap** (month) | `exchange_stage_schema` | `stage.__swap_orders_202401` |
+
+Staging and swap tables are **temporary** — they are dropped at the end of each run. The `exchange_stage_schema` schema must exist in the database before the first run.
+
+## Auto-creation of the partitioned table
+
+On the first run the strategy automatically creates the target table as a `PARTITION BY RANGE` table — in both overwrite and merge modes:
+
+- Column definitions are taken from the **model contract** (`schema.yml` with `contract: enforced: true` and `data_type` on each column).
+- The initial partition is created starting from `exchange_initial_partition_start_at`. Further partitions are added on demand via `ALTER TABLE ... ADD PARTITION`.
+- Partition step: `EVERY (INTERVAL '1 day')` or `EVERY (INTERVAL '1 month')` — controlled by `exchange_partition_granularity`.
+- Distribution: `DISTRIBUTED BY (<distributed_by>)` or `DISTRIBUTED RANDOMLY` if `distributed_by` is not set.
+
+On subsequent runs the check is idempotent — if the table already exists and is partitioned, creation is skipped.
+
+If the table exists but is **not** partitioned, the strategy raises a compile-time error with a hint to drop it manually before re-running.
+
 ## Usage examples
 
 > **Schema name.** By default dbt constructs the schema name as `<target_schema>_<custom_schema>` (e.g. `public_marts`). This adapter overrides that behaviour via the built-in `generate_schema_name` macro — the table is created exactly in the specified schema (`schema='marts'` → schema `marts`).
