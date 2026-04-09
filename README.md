@@ -469,13 +469,13 @@ UNION ALL
 
 -- target rows not present in delta by merge key (preserved)
 SELECT id, event_date, user_id, amount, loaded_at
-FROM marts.orders __tgt
-WHERE date_trunc('day', __tgt.event_date::timestamptz) = DATE '2026-01-01'
+FROM marts.orders __trg
+WHERE date_trunc('day', __trg.event_date::timestamptz) = DATE '2026-01-01'
   AND NOT EXISTS (
       SELECT 1
       FROM stage.__stage_orders __delta
       WHERE date_trunc('day', __delta.event_date::timestamptz) = DATE '2026-01-01'
-        AND __tgt."id" = __delta."id"
+        AND __trg."id" = __delta."id"
   )
 DISTRIBUTED BY (id);
 
@@ -650,13 +650,13 @@ WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
 UNION ALL
 
 SELECT id, event_date, user_id, amount, loaded_at
-FROM marts.orders __tgt
-WHERE date_trunc('day', __tgt.event_date::timestamptz) = DATE '2026-01-01'
+FROM marts.orders __trg
+WHERE date_trunc('day', __trg.event_date::timestamptz) = DATE '2026-01-01'
   AND NOT EXISTS (
       SELECT 1
       FROM stage.__stage_orders __delta
       WHERE date_trunc('day', __delta.event_date::timestamptz) = DATE '2026-01-01'
-        AND __tgt."id" = __delta."id"
+        AND __trg."id" = __delta."id"
   )
 DISTRIBUTED BY (id);
 
