@@ -296,6 +296,7 @@ models:
     exchange_stage_schema='stage',
     exchange_merge_partitions=false,
     exchange_partition_granularity='day',
+    exchange_initial_partition_start_at='2026-01-01',
     distributed_by='id',
     appendoptimized=true,
     orientation='column',
@@ -509,6 +510,7 @@ ANALYZE marts.orders;
     exchange_stage_schema='stage',
     exchange_merge_partitions=false,
     exchange_partition_granularity='day',
+    exchange_initial_partition_start_at='2026-01-01',
     distributed_by='id'
   )
 }}
