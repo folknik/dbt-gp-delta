@@ -10,5 +10,6 @@ Plugin = AdapterPlugin(
     adapter=GreenplumAdapter,
     credentials=GreenplumCredentials,
     include_path=greenplum.PACKAGE_PATH,
-    dependencies=['postgres']
+    dependencies=['postgres'],
+    project_name='dbt_gp_delta',
 )
