@@ -230,6 +230,388 @@ where event_date >= date_trunc('month', current_date - interval '1 month')
 - `WITHOUT VALIDATION` (`exchange_allow_with_validation=false`) skips Greenplum's constraint check during the exchange. Use it only when you are certain the swap table data satisfies the partition constraints.
 - The strategy processes only partition periods that are **actually present in the staging data**. Periods with no new data are never touched, so existing partition data for those periods is preserved as-is.
 
+## Usage examples
+
+> **Schema name.** By default dbt constructs the schema name as `<target_schema>_<custom_schema>` (e.g. `public_marts`). This adapter overrides that behaviour via the built-in `generate_schema_name` macro — the table is created exactly in the specified schema (`schema='marts'` → schema `marts`).
+
+A model contract in `schema.yml` is required for all examples:
+
+```yaml
+models:
+  - name: orders
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: id
+        data_type: bigint
+      - name: event_date
+        data_type: date
+      - name: user_id
+        data_type: integer
+      - name: amount
+        data_type: numeric(18,4)
+      - name: loaded_at
+        data_type: timestamp
+```
+
+---
+
+### 1. Append-optimised (AO) table
+
+#### 1.1. Overwrite mode
+
+```sql
+{{
+  config(
+    schema='marts',
+    materialized='incremental',
+    incremental_strategy='exchange_partition',
+    exchange_partition_key='event_date',
+    exchange_stage_schema='stage',
+    exchange_merge_partitions=false,
+    exchange_partition_granularity='day',
+    distributed_by='id',
+    appendoptimized=true,
+    orientation='column',
+    compresstype='zstd',
+    compresslevel=2
+  )
+}}
+
+SELECT
+    id,
+    event_date::date AS event_date,
+    user_id,
+    amount,
+    current_timestamp::timestamp AS loaded_at
+FROM {{ source("ods", "orders") }}
+{% if is_incremental() %}
+WHERE event_date::date BETWEEN '{{ var("start_dttm") }}'::date
+                             AND '{{ var("end_dttm") }}'::date
+{% endif %}
+```
+
+The target partition is **fully replaced** with data from the delta.
+
+Generated SQL (first run + one partition period):
+```sql
+-- Create target (first run)
+CREATE TABLE marts.orders (
+  "id" bigint,
+  "event_date" date,
+  "user_id" integer,
+  "amount" numeric(18,4),
+  "loaded_at" timestamp
+)
+WITH (
+  appendoptimized=true,
+  orientation=column,
+  compresstype=zstd,
+  compresslevel=2
+)
+DISTRIBUTED BY (id)
+PARTITION BY RANGE (event_date) (
+    START (DATE '2026-01-01') INCLUSIVE
+    END   (DATE '2026-01-02') EXCLUSIVE
+    EVERY (INTERVAL '1 day')
+);
+
+-- Idempotency: drop staging left from a previous failed run
+DROP TABLE IF EXISTS stage.__stage_orders;
+
+-- Create staging (one per run)
+CREATE TABLE stage.__stage_orders
+WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
+AS
+SELECT
+    id,
+    event_date::date AS event_date,
+    user_id,
+    amount,
+    current_timestamp::timestamp AS loaded_at
+FROM orders
+WHERE event_date::date BETWEEN '2026-01-01'::date AND '2026-01-02'::date
+DISTRIBUTED BY (id);
+
+-- For each period in delta:
+CREATE TABLE stage.__swap_orders_20260101
+WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
+AS
+SELECT id, event_date, user_id, amount, loaded_at
+FROM stage.__stage_orders
+WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
+DISTRIBUTED BY (id);
+
+ALTER TABLE marts.orders
+  EXCHANGE PARTITION FOR (DATE '2026-01-01')
+  WITH TABLE stage.__swap_orders_20260101;
+
+DROP TABLE stage.__swap_orders_20260101;
+
+-- Final cleanup
+DROP TABLE stage.__stage_orders;
+
+ANALYZE marts.orders;
+```
+
+---
+
+#### 1.2. Merge mode
+
+```sql
+{{
+  config(
+    schema='marts',
+    materialized='incremental',
+    incremental_strategy='exchange_partition',
+    exchange_partition_key='event_date',
+    exchange_stage_schema='stage',
+    exchange_merge_partitions=true,
+    unique_key=['id'],
+    exchange_partition_granularity='day',
+    distributed_by='id',
+    appendoptimized=true,
+    orientation='column',
+    compresstype='zstd',
+    compresslevel=2
+  )
+}}
+
+-- Delta only — not a full source snapshot
+SELECT
+    id,
+    event_date::date AS event_date,
+    user_id,
+    amount,
+    current_timestamp::timestamp AS loaded_at
+FROM {{ source("ods", "orders") }}
+{% if is_incremental() %}
+WHERE updated_at BETWEEN '{{ var("start_dttm") }}'::timestamp
+                      AND '{{ var("end_dttm") }}'::timestamp
+{% endif %}
+```
+
+When `id` matches, delta rows win. Target rows not present in the delta are preserved.
+
+Generated SQL (incremental run, one partition period):
+```sql
+-- Idempotency: drop staging left from a previous failed run
+DROP TABLE IF EXISTS stage.__stage_orders;
+
+-- Create staging (one per run)
+CREATE TABLE stage.__stage_orders
+WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
+AS
+SELECT
+    id,
+    event_date::date AS event_date,
+    user_id,
+    amount,
+    current_timestamp::timestamp AS loaded_at
+FROM orders
+WHERE updated_at BETWEEN '2026-01-01 00:00:00'::timestamp
+                      AND '2026-01-02 00:00:00'::timestamp
+DISTRIBUTED BY (id);
+
+-- For each period in delta:
+CREATE TABLE stage.__swap_orders_20260101
+WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
+AS
+-- delta rows (always included, win on key conflict)
+SELECT id, event_date, user_id, amount, loaded_at
+FROM stage.__stage_orders
+WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
+
+UNION ALL
+
+-- target rows not present in delta by merge key (preserved)
+SELECT id, event_date, user_id, amount, loaded_at
+FROM marts.orders __tgt
+WHERE date_trunc('day', __tgt.event_date::timestamptz) = DATE '2026-01-01'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM stage.__stage_orders __delta
+      WHERE date_trunc('day', __delta.event_date::timestamptz) = DATE '2026-01-01'
+        AND __tgt."id" = __delta."id"
+  )
+DISTRIBUTED BY (id);
+
+ALTER TABLE marts.orders
+  EXCHANGE PARTITION FOR (DATE '2026-01-01')
+  WITH TABLE stage.__swap_orders_20260101;
+
+DROP TABLE stage.__swap_orders_20260101;
+
+-- Final cleanup
+DROP TABLE stage.__stage_orders;
+
+ANALYZE marts.orders;
+```
+
+---
+
+### 2. Heap table
+
+> **Distribution:** if `distributed_by` is not set, the table is created with `DISTRIBUTED RANDOMLY`.
+> `DISTRIBUTED REPLICATED` is not supported: partitioned tables in Greenplum 6 are incompatible with replicated distribution.
+
+#### 2.1. Overwrite mode
+
+```sql
+{{
+  config(
+    schema='marts',
+    materialized='incremental',
+    incremental_strategy='exchange_partition',
+    exchange_partition_key='event_date',
+    exchange_stage_schema='stage',
+    exchange_merge_partitions=false,
+    exchange_partition_granularity='day',
+    distributed_by='id'
+  )
+}}
+
+SELECT
+    id,
+    event_date::date AS event_date,
+    user_id,
+    amount,
+    current_timestamp::timestamp AS loaded_at
+FROM {{ source("ods", "orders") }}
+{% if is_incremental() %}
+WHERE event_date::date BETWEEN '{{ var("start_dttm") }}'::date
+                             AND '{{ var("end_dttm") }}'::date
+{% endif %}
+```
+
+Generated SQL (first run + one partition period):
+```sql
+-- Create target (first run)
+CREATE TABLE marts.orders (
+  "id" bigint,
+  "event_date" date,
+  "user_id" integer,
+  "amount" numeric(18,4),
+  "loaded_at" timestamp
+)
+DISTRIBUTED BY (id)
+PARTITION BY RANGE (event_date) (
+    START (DATE '2026-01-01') INCLUSIVE
+    END   (DATE '2026-01-02') EXCLUSIVE
+    EVERY (INTERVAL '1 day')
+);
+
+DROP TABLE IF EXISTS stage.__stage_orders;
+
+CREATE TABLE stage.__stage_orders
+AS
+SELECT
+    id,
+    event_date::date AS event_date,
+    user_id,
+    amount,
+    current_timestamp::timestamp AS loaded_at
+FROM orders
+WHERE event_date::date BETWEEN '2026-01-01'::date AND '2026-01-02'::date
+DISTRIBUTED BY (id);
+
+CREATE TABLE stage.__swap_orders_20260101
+AS
+SELECT id, event_date, user_id, amount, loaded_at
+FROM stage.__stage_orders
+WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
+DISTRIBUTED BY (id);
+
+ALTER TABLE marts.orders
+  EXCHANGE PARTITION FOR (DATE '2026-01-01')
+  WITH TABLE stage.__swap_orders_20260101;
+
+DROP TABLE stage.__swap_orders_20260101;
+DROP TABLE stage.__stage_orders;
+ANALYZE marts.orders;
+```
+
+---
+
+#### 2.2. Merge mode
+
+```sql
+{{
+  config(
+    schema='marts',
+    materialized='incremental',
+    incremental_strategy='exchange_partition',
+    exchange_partition_key='event_date',
+    exchange_stage_schema='stage',
+    exchange_merge_partitions=true,
+    unique_key=['id'],
+    exchange_partition_granularity='day',
+    distributed_by='id'
+  )
+}}
+
+-- Delta only — not a full source snapshot
+SELECT
+    id,
+    event_date::date AS event_date,
+    user_id,
+    amount,
+    current_timestamp::timestamp AS loaded_at
+FROM {{ source("ods", "orders") }}
+{% if is_incremental() %}
+WHERE updated_at BETWEEN '{{ var("start_dttm") }}'::timestamp
+                      AND '{{ var("end_dttm") }}'::timestamp
+{% endif %}
+```
+
+Generated SQL (incremental run, one partition period):
+```sql
+DROP TABLE IF EXISTS stage.__stage_orders;
+
+CREATE TABLE stage.__stage_orders
+AS
+SELECT
+    id,
+    event_date::date AS event_date,
+    user_id,
+    amount,
+    current_timestamp::timestamp AS loaded_at
+FROM orders
+WHERE updated_at BETWEEN '2026-01-01 00:00:00'::timestamp
+                      AND '2026-01-02 00:00:00'::timestamp
+DISTRIBUTED BY (id);
+
+CREATE TABLE stage.__swap_orders_20260101
+AS
+SELECT id, event_date, user_id, amount, loaded_at
+FROM stage.__stage_orders
+WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
+
+UNION ALL
+
+SELECT id, event_date, user_id, amount, loaded_at
+FROM marts.orders __tgt
+WHERE date_trunc('day', __tgt.event_date::timestamptz) = DATE '2026-01-01'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM stage.__stage_orders __delta
+      WHERE date_trunc('day', __delta.event_date::timestamptz) = DATE '2026-01-01'
+        AND __tgt."id" = __delta."id"
+  )
+DISTRIBUTED BY (id);
+
+ALTER TABLE marts.orders
+  EXCHANGE PARTITION FOR (DATE '2026-01-01')
+  WITH TABLE stage.__swap_orders_20260101;
+
+DROP TABLE stage.__swap_orders_20260101;
+DROP TABLE stage.__stage_orders;
+ANALYZE marts.orders;
+```
+
+---
+
 ## Getting started
 
 - [Install dbt](https://docs.getdbt.com/docs/installation)
