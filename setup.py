@@ -59,22 +59,18 @@ def _get_plugin_version_dict():
 
 def _get_package_version():
     parts = _get_plugin_version_dict()
-    minor = "{major}.{minor}.0".format(**parts)
-    pre = parts["prekind"] + "1" if parts["prekind"] else ""
-    return f"{minor}{pre}"
+    version = "{major}.{minor}.{patch}".format(**parts)
+    pre = parts["prekind"] + parts["pre"] if parts["prekind"] else ""
+    return f"{version}{pre}"
 
 
-def _get_dbt_core_version():
-    parts = _get_plugin_version_dict()
-    minor = "{major}.{minor}.0".format(**parts)
-    pre = parts["prekind"] + "1" if parts["prekind"] else ""
-    return f"{minor}{pre}"
+# dbt version this adapter is built and tested against.
+# Update this when upgrading the base dbt-gp dependency.
+DBT_VERSION = "1.8.0"
 
-
-package_name = "dbt-greenplum"
+package_name = "dbt-gp-delta"
 package_version = _get_package_version()
-dbt_core_version = _get_dbt_core_version()
-description = """The greenplum adapter plugin for dbt (data build tool)"""
+description = "Greenplum adapter for dbt with exchange_partition incremental strategy"
 
 DBT_PSYCOPG2_NAME = _dbt_psycopg2_name()
 
@@ -84,28 +80,28 @@ setup(
     description=description,
     long_description=long_description,
     long_description_content_type="text/markdown",
-    author="Vladimir Mozzhukhin",
-    author_email="vladimir.bm@yandex.ru",
-    url="https://github.com/markporoshin/dbt-greenplum",
+    author="Alexey Fadeev",
+    author_email="fadeev1087@gmail.com",
+    url="https://github.com/folknik/dbt-gp-delta",
     packages=find_namespace_packages(include=["dbt", "dbt.*"]),
     package_data={
         "dbt": [
             "include/greenplum/dbt_project.yml",
             "include/greenplum/sample_profiles.yml",
             "include/greenplum/macros/*.sql",
-            "include/greenplum/macros/**/*.sql",
+            "include/greenplum/macros/materializations/*.sql",
+            "include/greenplum/macros/strategies/*.sql",
         ]
     },
     install_requires=[
-        "dbt-core~={}".format(dbt_core_version),
-        "dbt-postgres~={}".format(package_version),
+        "dbt-core~={}".format(DBT_VERSION),
+        "dbt-postgres~={}".format(DBT_VERSION),
         "{}~=2.8".format(DBT_PSYCOPG2_NAME),
     ],
     zip_safe=False,
     classifiers=[
-        "Development Status :: 5 - Production/Stable",
+        "Development Status :: 4 - Beta",
         "License :: OSI Approved :: Apache Software License",
-        "Operating System :: Microsoft :: Windows",
         "Operating System :: MacOS :: MacOS X",
         "Operating System :: POSIX :: Linux",
         "Programming Language :: Python :: 3.7",
@@ -116,4 +112,3 @@ setup(
     ],
     python_requires=">=3.7",
 )
-

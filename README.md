@@ -26,7 +26,7 @@ Easiest way to start use dbt-greenplum is to install it using pip
 Where `<version>` is same as your dbt version
 
 Available versions:
- - 0.1.0
+ - 0.4.0
 
 ## `exchange_partition` incremental strategy
 
