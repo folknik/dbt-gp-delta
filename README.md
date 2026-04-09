@@ -34,19 +34,84 @@ The `exchange_partition` strategy implements atomic, partition-level incremental
 
 #### How it works
 
-1. On the **first run**, dbt creates the target table as a range-partitioned table using `exchange_partition_key` as the partition column. The initial partition range is controlled by `exchange_initial_partition_start_at` / `exchange_initial_partition_end_at`.
-2. On every **incremental run**:
-   - The model SQL is materialised into a staging table in `exchange_stage_schema`.
-   - The strategy inspects the staging data to find the distinct set of partition periods that need to be updated (`DISTINCT date_trunc(..., partition_key)`).
-   - For each period:
-     - If the partition does not yet exist it is created automatically (`ALTER TABLE ... ADD PARTITION`).
-     - A swap table is built in `exchange_stage_schema` with the same storage options and distribution policy as the target:
-       - **overwrite mode** (`exchange_merge_partitions=false`): swap = staging rows for this period only.
-       - **merge mode** (`exchange_merge_partitions=true`): swap = staging rows UNION ALL existing partition rows that are **not** matched by `unique_key` (new rows win over old ones).
-     - `ALTER TABLE target EXCHANGE PARTITION FOR (DATE '...') WITH TABLE swap` atomically replaces the partition.
-     - The swap table is dropped.
-   - The staging table is dropped.
-   - `ANALYZE` is run on the target table (unless disabled).
+##### Overwrite mode (default, `exchange_merge_partitions=false`)
+
+```
+Start model
+    │
+    ▼
+if target does not exist:
+    └── CREATE TABLE target  (columns from model contract in schema.yml,
+    │                          PARTITION BY RANGE, EVERY '1 day|month')
+    │
+    ├── if target exists but is NOT partitioned → compile-time error
+    │
+    ▼
+DROP staging IF EXISTS  (idempotency on re-run after failure)
+    │
+    ▼
+CREATE staging table  (one per run, schema: exchange_stage_schema)
+    │                  name: <exchange_stage_schema>.__stage_<model>
+    ▼
+for each period in DISTINCT(staging.partition_key):   ← only periods with data
+    ├── ADD PARTITION (if missing)
+    ├── CREATE swap table  (schema: exchange_stage_schema, same dist + storage as target)
+    │           name: <exchange_stage_schema>.__swap_<model>_<YYYYMMDD>  (day)
+    │           name: <exchange_stage_schema>.__swap_<model>_<YYYYMM>    (month)
+    ├── INSERT  ← only staging rows for this period
+    ├── EXCHANGE PARTITION  (atomic leaf replacement)
+    └── DROP swap table
+    │
+    ▼
+DROP staging table
+ANALYZE target  (if exchange_analyze=true)
+```
+
+The target partition is **fully replaced** with data from the delta.
+
+##### Merge mode (`exchange_merge_partitions=true`)
+
+```
+Start model
+    │
+    ▼
+if target does not exist:
+    └── CREATE TABLE target  (columns from model contract in schema.yml,
+    │                          PARTITION BY RANGE, EVERY '1 day|month')
+    │
+    ├── if target exists but is NOT partitioned → compile-time error
+    │
+    ▼
+DROP staging IF EXISTS  (idempotency on re-run after failure)
+    │
+    ▼
+CREATE staging table  (one per run, schema: exchange_stage_schema)
+    │                  name: <exchange_stage_schema>.__stage_<model>
+    ▼
+for each period in DISTINCT(staging.partition_key):   ← only periods with data
+    ├── ADD PARTITION (if missing)
+    ├── CREATE swap table AS  (schema: exchange_stage_schema)
+    │     SELECT ... FROM delta WHERE period = this_period        ← all delta rows
+    │     UNION ALL
+    │     SELECT ... FROM target WHERE period = this_period
+    │       AND NOT EXISTS (SELECT 1 FROM delta WHERE merge_keys match)  ← target rows not in delta
+    ├── EXCHANGE PARTITION
+    └── DROP swap table
+    │
+    ▼
+DROP staging table
+ANALYZE target  (if exchange_analyze=true)
+```
+
+When `merge_keys` match, **delta rows take priority** — target rows whose key matches a delta row are dropped via `NOT EXISTS`. Target rows that are **not** present in the delta by key are **preserved**. Duplicates within the delta itself are **not deduplicated automatically** — if the delta contains multiple rows with the same `merge_key`, all of them will appear in the result. Deduplicate the delta in the model SQL if needed.
+
+**Why `NOT EXISTS` instead of `ROW_NUMBER()`:**
+
+`ROW_NUMBER()` would require an extra wrapping step: `UNION ALL` both sources → number rows per merge key → filter `WHERE rn = 1`. That adds two unnecessary steps and a more complex query plan. `NOT EXISTS` directly expresses the intent ("target rows that are not in the delta"), short-circuits on the first match, and behaves correctly regardless of whether the distribution key overlaps with the merge key.
+
+When to use merge mode:
+- The delta contains only new or changed rows, not a full source snapshot.
+- Historical rows that no longer exist in the source must be preserved in the target.
 
 #### Required model config
 
