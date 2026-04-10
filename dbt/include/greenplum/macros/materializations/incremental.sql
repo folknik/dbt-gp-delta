@@ -1,5 +1,9 @@
 {% macro get_incremental_exchange_partition_sql(arg_dict) %}
-  {{ greenplum__run_exchange_partition(staging_relation=arg_dict['temp_relation']) }}
+  {# greenplum__run_exchange_partition executes all statements directly via statement() calls.
+     The incremental materialization expects a SQL string back, so we run the strategy here
+     and return a no-op SELECT so that statement("main") has something to execute. #}
+  {% do greenplum__run_exchange_partition(staging_relation=arg_dict['temp_relation']) %}
+  SELECT 1
 {% endmacro %}
 
 

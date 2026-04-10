@@ -277,8 +277,8 @@
       AND tablename  = '{{ target_relation.identifier }}'
       AND partitiontype = 'range'
       AND partitionrangestart IS NOT NULL
-      AND partitionrangestart::date >= DATE '{{ date_str }}'
-      AND partitionrangestart::date <  DATE '{{ next_date_str }}'
+      AND regexp_replace(partitionrangestart, $re$'([^']+)'.*$re$, '\1')::date >= DATE '{{ date_str }}'
+      AND regexp_replace(partitionrangestart, $re$'([^']+)'.*$re$, '\1')::date <  DATE '{{ next_date_str }}'
   {% endcall %}
 
   {%- set check_res      = load_result(check_key) -%}
@@ -332,13 +332,23 @@
     DROP TABLE IF EXISTS {{ swap_name }};
   {% endcall %}
 
+  {# Build typed SELECT list from target relation columns to ensure exact type match
+     for EXCHANGE PARTITION (which requires identical column types in swap table). #}
+  {%- set target_cols = adapter.get_columns_in_relation(target_relation) -%}
+  {%- set typed_select_parts = [] -%}
+  {%- for col in target_cols -%}
+    {%- do typed_select_parts.append(adapter.quote(col.name) ~ '::' ~ col.data_type ~ ' AS ' ~ adapter.quote(col.name)) -%}
+  {%- endfor -%}
+  {%- set typed_select = typed_select_parts | join(',\n      ') -%}
+
   {% if not merge_mode %}
 
     {% call statement('gp_ctas_swap_' ~ date_str | replace('-','')) %}
       CREATE TABLE {{ swap_name }}
       {% if storage_clause %}{{ storage_clause }}{% endif %}
       AS
-      SELECT *
+      SELECT
+        {{ typed_select }}
       FROM {{ source_relation }}
       WHERE date_trunc('{{ granularity }}', {{ partition_key }}::timestamptz) = DATE '{{ date_str }}'
       {{ dist_clause }};
@@ -353,8 +363,7 @@
       ) }}
     {%- endif -%}
 
-    {%- set cols = adapter.get_columns_in_relation(source_relation) -%}
-    {%- set col_list = get_quoted_csv(cols | map(attribute='name')) -%}
+    {%- set col_list = get_quoted_csv(target_cols | map(attribute='name')) -%}
 
     {%- set join_parts = [] -%}
     {%- for key in merge_keys -%}
@@ -366,7 +375,8 @@
       CREATE TABLE {{ swap_name }}
       {% if storage_clause %}{{ storage_clause }}{% endif %}
       AS
-      SELECT {{ col_list }}
+      SELECT
+        {{ typed_select }}
       FROM {{ source_relation }}
       WHERE date_trunc('{{ granularity }}', {{ partition_key }}::timestamptz) = DATE '{{ date_str }}'
 

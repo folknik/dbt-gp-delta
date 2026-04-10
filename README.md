@@ -26,7 +26,7 @@ Easiest way to start use dbt-greenplum is to install it using pip
 Where `<version>` is same as your dbt version
 
 Available versions:
- - 0.11.0
+ - 0.14.0
 
 ## `exchange_partition` incremental strategy
 
@@ -34,15 +34,17 @@ The `exchange_partition` strategy implements atomic, partition-level incremental
 
 #### How it works
 
+> **First run vs subsequent runs.** On the very first run (target table does not exist), dbt only creates an empty partitioned table — no data is loaded. Data loading starts from the second run, when the target table already exists and the strategy kicks in. This is standard behaviour for the `exchange_partition` strategy: the first run initialises the table structure, all subsequent runs load data incrementally by window.
+
 ##### Overwrite mode (default, `exchange_merge_partitions=false`)
 
 ```
-Start model
-    │
-    ▼
-if target does not exist:
+Run 1 — target does not exist:
     └── CREATE TABLE target  (columns from model contract in schema.yml,
-    │                          PARTITION BY RANGE, EVERY '1 day|month')
+                               PARTITION BY RANGE, EVERY '1 day|month')
+        target table is left empty
+
+Run 2+ — target exists:
     │
     ├── if target exists but is NOT partitioned → compile-time error
     │
@@ -55,7 +57,7 @@ for each period in DISTINCT(staging.partition_key):   ← only periods with data
     ├── CREATE swap table  (schema: exchange_stage_schema, same dist + storage as target)
     │           name: <exchange_stage_schema>.__swap_<model>_<YYYYMMDD>  (day)
     │           name: <exchange_stage_schema>.__swap_<model>_<YYYYMM>    (month)
-    ├── INSERT  ← only staging rows for this period
+    │           columns cast to exact types from target (required for EXCHANGE PARTITION)
     ├── EXCHANGE PARTITION  (atomic leaf replacement)
     └── DROP swap table
     │
@@ -69,12 +71,12 @@ The target partition is **fully replaced** with data from the delta.
 ##### Merge mode (`exchange_merge_partitions=true`)
 
 ```
-Start model
-    │
-    ▼
-if target does not exist:
+Run 1 — target does not exist:
     └── CREATE TABLE target  (columns from model contract in schema.yml,
-    │                          PARTITION BY RANGE, EVERY '1 day|month')
+                               PARTITION BY RANGE, EVERY '1 day|month')
+        target table is left empty
+
+Run 2+ — target exists:
     │
     ├── if target exists but is NOT partitioned → compile-time error
     │
@@ -85,7 +87,7 @@ dbt creates a temporary staging table with the model SQL result
 for each period in DISTINCT(staging.partition_key):   ← only periods with data
     ├── ADD PARTITION (if missing)
     ├── CREATE swap table AS  (schema: exchange_stage_schema)
-    │     SELECT ... FROM delta WHERE period = this_period        ← all delta rows
+    │     SELECT ... FROM delta WHERE period = this_period        ← all delta rows (cast to target types)
     │     UNION ALL
     │     SELECT ... FROM target WHERE period = this_period
     │       AND NOT EXISTS (SELECT 1 FROM delta WHERE merge_keys match)  ← target rows not in delta
@@ -115,7 +117,7 @@ When `merge_keys` match, **delta rows take priority** — target rows whose key 
 | `unique_key` | string or list | — | Column(s) that uniquely identify a row. Required when `exchange_merge_partitions=true`. |
 | `exchange_partition_granularity` | string | `'day'` | Partition period: `'day'` or `'month'`. |
 | `exchange_create_missing_partitions` | bool | `true` | Automatically add missing partitions for new periods found in staging data. |
-| `exchange_allow_with_validation` | bool | `true` | Use `WITH VALIDATION` during `EXCHANGE PARTITION`. Set to `false` for faster exchange when data correctness is guaranteed upstream. |
+| `exchange_allow_with_validation` | bool | `true` | When `true`, Greenplum validates that the swap table data satisfies the partition constraints during `EXCHANGE PARTITION`. Set to `false` to skip validation for faster exchange — use only when data correctness is guaranteed upstream. |
 | `exchange_analyze` | bool | `true` | Run `ANALYZE` on the target table after all partitions are exchanged. |
 | `exchange_initial_partition_start_at` | string `YYYY-MM-DD` | Jan 1 of current year | Start date of the initial partition created on the first run. Can also be set via dbt var `exchange_initial_partition_start_at`. |
 | `exchange_initial_partition_end_at` | string `YYYY-MM-DD` | start + 1 period | End date of the initial partition range. If omitted, exactly one partition is created. Can also be set via dbt var `exchange_initial_partition_end_at`. |
@@ -230,7 +232,7 @@ where event_date >= date_trunc('month', current_date - interval '1 month')
 | Table | Schema | Example name |
 |---|---|---|
 | **target** (partitioned) | model schema (`profiles.yml` / `dbt_project.yml`) | `marts.orders` |
-| **staging** | session temp schema (managed by dbt) | `pg_temp.orders__dbt_tmp` |
+| **staging** | session temp schema (managed by dbt) | `orders__dbt_tmp` |
 | **swap** (day) | `exchange_stage_schema` | `stage.__swap_orders_20240101` |
 | **swap** (month) | `exchange_stage_schema` | `stage.__swap_orders_202401` |
 
@@ -344,7 +346,12 @@ PARTITION BY RANGE (event_date) (
 CREATE TABLE stage.__swap_orders_20260101
 WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
 AS
-SELECT id, event_date, user_id, amount, loaded_at
+SELECT
+  "id"::bigint AS "id",
+  "event_date"::date AS "event_date",
+  "user_id"::integer AS "user_id",
+  "amount"::numeric(18,4) AS "amount",
+  "loaded_at"::timestamp AS "loaded_at"
 FROM orders__dbt_tmp
 WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
 DISTRIBUTED BY (id);
@@ -408,15 +415,20 @@ Generated SQL (incremental run, one partition period):
 CREATE TABLE stage.__swap_orders_20260101
 WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
 AS
--- delta rows (always included, win on key conflict)
-SELECT id, event_date, user_id, amount, loaded_at
+-- delta rows (always included, win on key conflict); cast to exact target types
+SELECT
+  "id"::bigint AS "id",
+  "event_date"::date AS "event_date",
+  "user_id"::integer AS "user_id",
+  "amount"::numeric(18,4) AS "amount",
+  "loaded_at"::timestamp AS "loaded_at"
 FROM orders__dbt_tmp
 WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
 
 UNION ALL
 
 -- target rows not present in delta by merge key (preserved)
-SELECT id, event_date, user_id, amount, loaded_at
+SELECT "id", "event_date", "user_id", "amount", "loaded_at"
 FROM marts.orders __trg
 WHERE date_trunc('day', __trg.event_date::timestamptz) = DATE '2026-01-01'
   AND NOT EXISTS (
@@ -497,7 +509,12 @@ PARTITION BY RANGE (event_date) (
 
 CREATE TABLE stage.__swap_orders_20260101
 AS
-SELECT id, event_date, user_id, amount, loaded_at
+SELECT
+  "id"::bigint AS "id",
+  "event_date"::date AS "event_date",
+  "user_id"::integer AS "user_id",
+  "amount"::numeric(18,4) AS "amount",
+  "loaded_at"::timestamp AS "loaded_at"
 FROM orders__dbt_tmp
 WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
 DISTRIBUTED BY (id);
@@ -553,15 +570,20 @@ Generated SQL (incremental run, one partition period):
 
 CREATE TABLE stage.__swap_orders_20260101
 AS
--- delta rows (always included, win on key conflict)
-SELECT id, event_date, user_id, amount, loaded_at
+-- delta rows (always included, win on key conflict); cast to exact target types
+SELECT
+  "id"::bigint AS "id",
+  "event_date"::date AS "event_date",
+  "user_id"::integer AS "user_id",
+  "amount"::numeric(18,4) AS "amount",
+  "loaded_at"::timestamp AS "loaded_at"
 FROM orders__dbt_tmp
 WHERE date_trunc('day', event_date::timestamptz) = DATE '2026-01-01'
 
 UNION ALL
 
 -- target rows not present in delta by merge key (preserved)
-SELECT id, event_date, user_id, amount, loaded_at
+SELECT "id", "event_date", "user_id", "amount", "loaded_at"
 FROM marts.orders __trg
 WHERE date_trunc('day', __trg.event_date::timestamptz) = DATE '2026-01-01'
   AND NOT EXISTS (
