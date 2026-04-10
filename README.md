@@ -34,15 +34,15 @@ The `exchange_partition` strategy implements atomic, partition-level incremental
 
 #### How it works
 
-> **First run vs subsequent runs.** On the very first run (target table does not exist), dbt only creates an empty partitioned table — no data is loaded. Data loading starts from the second run, when the target table already exists and the strategy kicks in. This is standard behaviour for the `exchange_partition` strategy: the first run initialises the table structure, all subsequent runs load data incrementally via `EXCHANGE PARTITION`.
+> **First run vs subsequent runs.** On the very first run (target table does not exist), dbt creates the partitioned table and immediately loads all data via a direct `INSERT INTO`. No staging or swap tables are used on the first run — the model SQL is executed in full (without the `is_incremental()` filter). From the second run onward, the strategy kicks in: dbt creates a temporary staging table, then uses `EXCHANGE PARTITION` to atomically replace each affected partition via swap tables.
 
 ##### Overwrite mode (default, `exchange_merge_partitions=false`)
 
 ```
 Run 1 — target does not exist:
-    └── CREATE TABLE target  (columns from model contract in schema.yml,
-                               partition DDL from raw_partition config)
-        target table is left empty
+    ├── CREATE TABLE target  (columns from model contract in schema.yml,
+    │                          partition DDL from raw_partition config)
+    └── INSERT INTO target (<full model SQL, no is_incremental() filter>)
 
 Run 2+ — target exists:
     │
@@ -72,9 +72,9 @@ The target partition is **fully replaced** with data from the delta.
 
 ```
 Run 1 — target does not exist:
-    └── CREATE TABLE target  (columns from model contract in schema.yml,
-                               partition DDL from raw_partition config)
-        target table is left empty
+    ├── CREATE TABLE target  (columns from model contract in schema.yml,
+    │                          partition DDL from raw_partition config)
+    └── INSERT INTO target (<full model SQL, no is_incremental() filter>)
 
 Run 2+ — target exists:
     │
@@ -253,14 +253,14 @@ The staging table is a standard dbt temp table — created automatically before 
 
 ## Auto-creation of the partitioned table
 
-On the first run dbt creates the target table as an empty partitioned table. Data loading starts from the second run via the `EXCHANGE PARTITION` strategy:
+On the first run dbt creates the partitioned target table and immediately loads all data into it via a direct `INSERT INTO`. The full model SQL is executed (without the `is_incremental()` filter):
 
 - Column definitions are taken from the **model contract** (`schema.yml` with `contract: enforced: true` and `data_type` on each column).
-- The partition DDL is taken from the `raw_partition` config parameter — written explicitly in `config()`. This gives full control over the initial partition range, step, and any Greenplum-specific partition options.
+- The partition DDL is taken from the `raw_partition` config parameter — written explicitly in `config()`. This gives full control over the initial partition range, step, and any Greenplum-specific partition options. Make sure `raw_partition` covers all periods present in the source data on the first run.
 - Further partitions are added on demand via `ALTER TABLE ... ADD PARTITION` as new periods appear in the staging data (controlled by `exchange_create_missing_partitions`).
 - Distribution: `DISTRIBUTED BY (<distributed_by>)` or `DISTRIBUTED RANDOMLY` if `distributed_by` is not set.
 
-On subsequent runs the check is idempotent — if the table already exists and is partitioned, creation is skipped.
+On subsequent runs the check is idempotent — if the table already exists and is partitioned, creation is skipped and the `EXCHANGE PARTITION` strategy takes over.
 
 If the table exists but is **not** partitioned, the strategy raises a compile-time error with a hint to drop it manually before re-running.
 
@@ -337,9 +337,9 @@ WHERE event_date::date BETWEEN '{{ var("start_dttm") }}'::date
 
 The target partition is **fully replaced** with data from the delta.
 
-Generated SQL (first run + one partition period):
+Generated SQL (first run):
 ```sql
--- Create target (first run)
+-- Create target and load all data in one step (first run, is_incremental() is false)
 CREATE TABLE marts.orders (
   "id" bigint,
   "event_date" date,
@@ -360,6 +360,20 @@ PARTITION BY RANGE (event_date) (
     EVERY (INTERVAL '1 day')
 );
 
+INSERT INTO marts.orders (
+  SELECT
+      id,
+      event_date::date AS event_date,
+      user_id,
+      amount,
+      current_timestamp::timestamp AS loaded_at
+  FROM ods.orders
+  -- no is_incremental() filter on first run
+);
+```
+
+Generated SQL (subsequent run, one partition period):
+```sql
 -- dbt creates a temp staging table automatically (heap, session temp schema):
 -- CREATE TEMP TABLE orders__dbt_tmp AS ( <model SQL> ) DISTRIBUTED BY (id);
 
@@ -526,9 +540,9 @@ WHERE event_date::date BETWEEN '{{ var("start_dttm") }}'::date
 {% endif %}
 ```
 
-Generated SQL (first run + one partition period):
+Generated SQL (first run):
 ```sql
--- Create target (first run)
+-- Create target and load all data in one step (first run, is_incremental() is false)
 CREATE TABLE marts.orders (
   "id" bigint,
   "event_date" date,
@@ -543,6 +557,20 @@ PARTITION BY RANGE (event_date) (
     EVERY (INTERVAL '1 day')
 );
 
+INSERT INTO marts.orders (
+  SELECT
+      id,
+      event_date::date AS event_date,
+      user_id,
+      amount,
+      current_timestamp::timestamp AS loaded_at
+  FROM ods.orders
+  -- no is_incremental() filter on first run
+);
+```
+
+Generated SQL (subsequent run, one partition period):
+```sql
 -- dbt creates a temp staging table automatically (heap, session temp schema):
 -- CREATE TEMP TABLE orders__dbt_tmp AS ( <model SQL> ) DISTRIBUTED BY (id);
 
