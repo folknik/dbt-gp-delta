@@ -10,6 +10,9 @@
   {%- set compresslevel = config.get('compresslevel', default=4) -%}
   {%- set blocksize = config.get('blocksize', default=32768) -%}
 
+  {%- set contract_config   = config.get('contract') -%}
+  {%- set contract_enforced = contract_config.enforced if contract_config is not none else false -%}
+
   {% set partition_spec = config.get('partition_spec', none) %}
 
   {%- set raw_partition = config.get('raw_partition', none) -%}
@@ -23,33 +26,6 @@
   {%- set partition_every = config.get('partition_every', none) -%}
   {%- set partition_values = config.get('partition_values', none) -%}
 
-  {%- set exchange_partition_key = config.get('exchange_partition_key', none) -%}
-  {%- if raw_partition is none and partition_type is none and exchange_partition_key is not none and not temporary -%}
-    {%- set _granularity = config.get('exchange_partition_granularity', 'day') | lower -%}
-    {%- set _start_at    = config.get(
-          'exchange_initial_partition_start_at',
-          var('exchange_initial_partition_start_at', modules.datetime.datetime.now().strftime('%Y-01-01'))
-        ) -%}
-    {%- set _dt_start = modules.datetime.datetime.strptime(_start_at, '%Y-%m-%d') -%}
-    {%- set _end_at = config.get(
-          'exchange_initial_partition_end_at',
-          var('exchange_initial_partition_end_at', none)
-        ) -%}
-    {%- if _end_at is not none -%}
-      {%- set _dt_end = modules.datetime.datetime.strptime(_end_at, '%Y-%m-%d') -%}
-    {%- elif _granularity == 'day' -%}
-      {%- set _dt_end = _dt_start + modules.datetime.timedelta(days=1) -%}
-    {%- else -%}
-      {%- set _total  = _dt_start.year * 12 + (_dt_start.month - 1) + 1 -%}
-      {%- set _dt_end = modules.datetime.datetime(_total // 12, _total % 12 + 1, 1) -%}
-    {%- endif -%}
-    {%- set raw_partition = 'PARTITION BY RANGE (' ~ exchange_partition_key ~ ') ('
-        ~ ' START (DATE \'' ~ _start_at ~ '\') INCLUSIVE'
-        ~ ' END   (DATE \'' ~ _dt_end.strftime('%Y-%m-%d') ~ '\') EXCLUSIVE'
-        ~ ' EVERY (INTERVAL \'1 ' ~ _granularity ~ '\')'
-        ~ ')' -%}
-  {%- endif -%}
-
   {%- set is_partition = raw_partition is not none or partition_type is not none -%}
 
   {{ sql_header if sql_header is not none }}
@@ -57,8 +33,8 @@
   {% if is_partition and not temporary %}
 
     {# CREATING TABLE #}
-    {%- if exchange_partition_key is not none -%}
-      {# exchange_partition: колонки из contract, storage без жёстких дефолтов #}
+    {%- if contract_enforced -%}
+      {# contract path: колонки из schema.yml, storage без жёстких дефолтов #}
       {{ get_assert_columns_equivalent(sql) }}
       {%- set _fields_ddl    = get_table_columns_and_constraints() -%}
       {%- set _storage_clause = gp_build_storage_clause() -%}
@@ -79,10 +55,10 @@
     ;
 
     {# INSERTING DATA #}
-    {# For exchange_partition tables: skip INSERT on initial creation — the table is
+    {# For exchange_partition strategy: skip INSERT on initial creation — the table is
        created empty, and data will be loaded by the exchange_partition strategy
        on subsequent incremental runs. #}
-    {%- if exchange_partition_key is none -%}
+    {%- if config.get('incremental_strategy') != 'exchange_partition' -%}
     insert into {{ relation }} (
         {{ sql }}
     );
@@ -103,11 +79,6 @@
       )
       {{ distribution(distributed_by, distributed_replicated) }}
       ;
-  {% endif %}
-
-  {% set contract_config = config.get('contract') %}
-  {% if contract_config.enforced and config.get('incremental_strategy') != 'exchange_partition' %}
-     {{exceptions.warn("Model contracts cannot be enforced by dbt-greenplum!")}}
   {% endif %}
 
 {%- endmacro %}

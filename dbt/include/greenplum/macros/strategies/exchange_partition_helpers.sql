@@ -332,14 +332,18 @@
     DROP TABLE IF EXISTS {{ swap_name }};
   {% endcall %}
 
-  {# Build typed SELECT list from target relation columns to ensure exact type match
-     for EXCHANGE PARTITION (which requires identical column types in swap table). #}
-  {%- set target_cols = adapter.get_columns_in_relation(target_relation) -%}
+  {# Build typed SELECT list from the model contract (schema.yml).
+     Contract is always enforced for exchange_partition, so model['columns'] is
+     the authoritative source of column names and types — no DB round-trip needed. #}
+  {%- set contract_cols = model['columns'] -%}
   {%- set typed_select_parts = [] -%}
-  {%- for col in target_cols -%}
-    {%- do typed_select_parts.append(adapter.quote(col.name) ~ '::' ~ col.data_type ~ ' AS ' ~ adapter.quote(col.name)) -%}
+  {%- set col_names = [] -%}
+  {%- for col_name, col in contract_cols.items() -%}
+    {%- do typed_select_parts.append(adapter.quote(col_name) ~ '::' ~ col['data_type'] ~ ' AS ' ~ adapter.quote(col_name)) -%}
+    {%- do col_names.append(adapter.quote(col_name)) -%}
   {%- endfor -%}
   {%- set typed_select = typed_select_parts | join(',\n      ') -%}
+  {%- set col_list = col_names | join(', ') -%}
 
   {% if not merge_mode %}
 
@@ -362,8 +366,6 @@
           "(a column name or list of column names that uniquely identify a row)."
       ) }}
     {%- endif -%}
-
-    {%- set col_list = get_quoted_csv(target_cols | map(attribute='name')) -%}
 
     {%- set join_parts = [] -%}
     {%- for key in merge_keys -%}

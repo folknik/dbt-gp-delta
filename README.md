@@ -26,11 +26,11 @@ Easiest way to start use dbt-greenplum is to install it using pip
 Where `<version>` is same as your dbt version
 
 Available versions:
- - 0.14.0
+ - 1.1.0
 
 ## `exchange_partition` incremental strategy
 
-The `exchange_partition` strategy implements atomic, partition-level incremental loads using Greenplum's `EXCHANGE PARTITION` DDL operation. Instead of inserting rows into the live table, it builds a separate swap table for each affected partition period and atomically replaces the partition via a metadata-only operation — no physical data movement occurs.
+The `exchange_partition` strategy implements atomic, partition-level incremental loads using Greenplum's `EXCHANGE PARTITION` DDL operation. Instead of inserting rows into the live table, it builds a separate swap table for each affected partition period and atomically replaces the partition via a metadata-only operation - no physical data movement occurs.
 
 #### How it works
 
@@ -41,7 +41,7 @@ The `exchange_partition` strategy implements atomic, partition-level incremental
 ```
 Run 1 — target does not exist:
     └── CREATE TABLE target  (columns from model contract in schema.yml,
-                               PARTITION BY RANGE, EVERY '1 day|month')
+                               partition DDL from raw_partition config)
         target table is left empty
 
 Run 2+ — target exists:
@@ -54,10 +54,10 @@ dbt creates a temporary staging table with the model SQL result
     ▼
 for each period in DISTINCT(staging.partition_key):   ← only periods with data
     ├── ADD PARTITION (if missing)
-    ├── CREATE swap table  (schema: exchange_stage_schema, same dist + storage as target)
-    │           name: <exchange_stage_schema>.__swap_<model>_<YYYYMMDD>  (day)
-    │           name: <exchange_stage_schema>.__swap_<model>_<YYYYMM>    (month)
-    │           columns cast to exact types from target (required for EXCHANGE PARTITION)
+    ├── CREATE swap table  (schema: exchange_swap_schema, same dist + storage as target)
+    │           name: <exchange_swap_schema>.__swap_<model>_<YYYYMMDD>  (day)
+    │           name: <exchange_swap_schema>.__swap_<model>_<YYYYMM>    (month)
+    │           columns cast to exact types from model contract (schema.yml)
     ├── EXCHANGE PARTITION  (atomic leaf replacement)
     └── DROP swap table
     │
@@ -73,7 +73,7 @@ The target partition is **fully replaced** with data from the delta.
 ```
 Run 1 — target does not exist:
     └── CREATE TABLE target  (columns from model contract in schema.yml,
-                               PARTITION BY RANGE, EVERY '1 day|month')
+                               partition DDL from raw_partition config)
         target table is left empty
 
 Run 2+ — target exists:
@@ -86,8 +86,8 @@ dbt creates a temporary staging table with the model SQL result
     ▼
 for each period in DISTINCT(staging.partition_key):   ← only periods with data
     ├── ADD PARTITION (if missing)
-    ├── CREATE swap table AS  (schema: exchange_stage_schema)
-    │     SELECT ... FROM delta WHERE period = this_period        ← all delta rows (cast to target types)
+    ├── CREATE swap table AS  (schema: exchange_swap_schema)
+    │     SELECT ... FROM delta WHERE period = this_period        ← all delta rows (cast to types from model contract)
     │     UNION ALL
     │     SELECT ... FROM target WHERE period = this_period
     │       AND NOT EXISTS (SELECT 1 FROM delta WHERE merge_keys match)  ← target rows not in delta
@@ -99,16 +99,17 @@ dbt drops the temporary staging table automatically (end of session)
 ANALYZE target  (if exchange_analyze=true)
 ```
 
-When `merge_keys` match, **delta rows take priority** — target rows whose key matches a delta row are dropped via `NOT EXISTS`. Target rows that are **not** present in the delta by key are **preserved**. Duplicates within the delta itself are **not deduplicated automatically** — if the delta contains multiple rows with the same `merge_key`, all of them will appear in the result. Deduplicate the delta in the model SQL if needed.
+When `merge_keys` match, **delta rows take priority** - target rows whose key matches a delta row are dropped via `NOT EXISTS`. Target rows that are **not** present in the delta by key are **preserved**. Duplicates within the delta itself are **not deduplicated automatically** - if the delta contains multiple rows with the same `merge_key`, all of them will appear in the result. Deduplicate the delta in the model SQL if needed.
 
 #### Required model config
 
 | Parameter | Type | Description |
 |---|---|---|
-| `exchange_partition_key` | string | Column used as the partition key. Must be castable to `timestamptz`. |
-| `exchange_stage_schema` | string | Schema where staging and swap tables are created. Must exist in the database. |
-| `exchange_merge_partitions` | bool | `true` — merge new rows with existing partition data (requires `unique_key`). `false` — fully overwrite affected partitions with staging data. |
-| `contract: enforced: true` | — | Declared in `schema.yml` (not in `config()`). Column types are required because the target table is created via explicit DDL, not CTAS. The strategy raises a compile-time error if the contract is not enforced. |
+| `partition_column` | string | Column used as the partition key. Must be castable to `timestamptz`. |
+| `raw_partition` | string | Full `PARTITION BY RANGE (...) (...)` DDL clause. Written explicitly in `config()` — no auto-generation. |
+| `exchange_swap_schema` | string | Schema where swap tables are created. Must exist in the database. |
+| `exchange_merge_partitions` | bool | `true` - merge new rows with existing partition data (requires `unique_key`). `false` - fully overwrite affected partitions with staging data. |
+| `contract: enforced: true` | - | Declared in `schema.yml` (not in `config()`). Column types are required because the target table is created via explicit DDL, not CTAS. The strategy raises a compile-time error if the contract is not enforced. |
 
 #### Optional model config
 
@@ -119,8 +120,6 @@ When `merge_keys` match, **delta rows take priority** — target rows whose key 
 | `exchange_create_missing_partitions` | bool | `true` | Automatically add missing partitions for new periods found in staging data. |
 | `exchange_allow_with_validation` | bool | `true` | When `true`, Greenplum validates that the swap table data satisfies the partition constraints during `EXCHANGE PARTITION`. Set to `false` to skip validation for faster exchange — use only when data correctness is guaranteed upstream. |
 | `exchange_analyze` | bool | `true` | Run `ANALYZE` on the target table after all partitions are exchanged. |
-| `exchange_initial_partition_start_at` | string `YYYY-MM-DD` | Jan 1 of current year | Start date of the initial partition created on the first run. Can also be set via dbt var `exchange_initial_partition_start_at`. |
-| `exchange_initial_partition_end_at` | string `YYYY-MM-DD` | start + 1 period | End date of the initial partition range. If omitted, exactly one partition is created. Can also be set via dbt var `exchange_initial_partition_end_at`. |
 | `distributed_by` | string | `RANDOMLY` | Distribution key(s) for the target table, e.g. `'id'` or `'tenant_id, id'`. |
 | `appendoptimized` | bool | — | Create an append-optimised (AO) table. |
 | `orientation` | string | — | `'column'` or `'row'`. Applies only when `appendoptimized=true`. |
@@ -138,13 +137,15 @@ Every run fully replaces all partitions that appear in the new data. Useful when
         materialized='incremental',
         incremental_strategy='exchange_partition',
 
-        exchange_partition_key='transaction_date',
+        partition_column='transaction_date',
+        raw_partition="""PARTITION BY RANGE (transaction_date) (
+            START (DATE '2024-01-01') INCLUSIVE
+            END   (DATE '2024-02-01') EXCLUSIVE
+            EVERY (INTERVAL '1 day')
+        )""",
         exchange_partition_granularity='day',
-        exchange_stage_schema='stage',
+        exchange_swap_schema='stage',
         exchange_merge_partitions=false,
-
-        exchange_initial_partition_start_at='2024-01-01',
-        exchange_initial_partition_end_at='2024-02-01',
 
         distributed_by='id',
         appendoptimized=true,
@@ -191,13 +192,16 @@ New rows are merged with existing partition data. Rows matched by `unique_key` a
         materialized='incremental',
         incremental_strategy='exchange_partition',
 
-        exchange_partition_key='event_date',
+        partition_column='event_date',
+        raw_partition="""PARTITION BY RANGE (event_date) (
+            START (DATE '2024-01-01') INCLUSIVE
+            END   (DATE '2024-02-01') EXCLUSIVE
+            EVERY (INTERVAL '1 month')
+        )""",
         exchange_partition_granularity='month',
-        exchange_stage_schema='stage',
+        exchange_swap_schema='stage',
         exchange_merge_partitions=true,
         unique_key=['tenant_id', 'event_id'],
-
-        exchange_initial_partition_start_at='2024-01-01',
 
         distributed_by='tenant_id',
         appendoptimized=true,
@@ -221,9 +225,10 @@ where event_date >= date_trunc('month', current_date - interval '1 month')
 #### Important notes
 
 - The target table **must be a range-partitioned table**. If a non-partitioned table with the same name already exists, the strategy raises a compile-time error. Drop it manually before the first run.
-- `exchange_stage_schema` must exist in the database before the first run. The strategy does not create it automatically.
+- `exchange_swap_schema` must exist in the database before the first run. The strategy does not create it automatically.
+- `raw_partition` must be provided explicitly in `config()`. There is no auto-generation of the partition DDL.
 - Swap tables are named `__swap_{model_name}_{YYYYMMDD}` (day) or `__swap_{model_name}_{YYYYMM}` (month) and are always dropped after a successful exchange. If a run is interrupted they will be cleaned up on the next run. **Model name must not exceed 47 characters** (day granularity) or **49 characters** (month granularity) — Greenplum enforces a 63-character limit on identifiers, and the swap table name prefix `__swap_` (7 chars) plus date suffix `_YYYYMMDD` (9 chars) or `_YYYYMM` (7 chars) consumes the rest.
-- The staging table is a standard dbt temporary table created by the incremental materialization before the strategy is called. It lives in the session temp schema and is dropped automatically at the end of the session. It is **not** created in `exchange_stage_schema`.
+- The staging table is a standard dbt temporary table created by the incremental materialization before the strategy is called. It lives in the session temp schema and is dropped automatically at the end of the session. It is **not** created in `exchange_swap_schema`.
 - `WITHOUT VALIDATION` (`exchange_allow_with_validation=false`) skips Greenplum's constraint check during the exchange. Use it only when you are certain the swap table data satisfies the partition constraints.
 - The strategy processes only partition periods that are **actually present in the staging data**. Periods with no new data are never touched, so existing partition data for those periods is preserved as-is.
 
@@ -233,18 +238,18 @@ where event_date >= date_trunc('month', current_date - interval '1 month')
 |---|---|---|
 | **target** (partitioned) | model schema (`profiles.yml` / `dbt_project.yml`) | `marts.orders` |
 | **staging** | session temp schema (managed by dbt) | `orders__dbt_tmp` |
-| **swap** (day) | `exchange_stage_schema` | `stage.__swap_orders_20240101` |
-| **swap** (month) | `exchange_stage_schema` | `stage.__swap_orders_202401` |
+| **swap** (day) | `exchange_swap_schema` | `stage.__swap_orders_20240101` |
+| **swap** (month) | `exchange_swap_schema` | `stage.__swap_orders_202401` |
 
-The staging table is a standard dbt temp table — created automatically before the strategy runs and dropped at the end of the session. Swap tables live in `exchange_stage_schema` and are dropped immediately after each partition exchange. The `exchange_stage_schema` schema must exist in the database before the first run.
+The staging table is a standard dbt temp table — created automatically before the strategy runs and dropped at the end of the session. Swap tables live in `exchange_swap_schema` and are dropped immediately after each partition exchange. The `exchange_swap_schema` schema must exist in the database before the first run.
 
 ## Auto-creation of the partitioned table
 
 On the first run the strategy automatically creates the target table as a `PARTITION BY RANGE` table — in both overwrite and merge modes:
 
 - Column definitions are taken from the **model contract** (`schema.yml` with `contract: enforced: true` and `data_type` on each column).
-- The initial partition range is defined by `exchange_initial_partition_start_at` and `exchange_initial_partition_end_at`. If `exchange_initial_partition_end_at` is omitted, a single partition of one period (one day or one month) is created. Further partitions are added on demand via `ALTER TABLE ... ADD PARTITION`.
-- Partition step: `EVERY (INTERVAL '1 day')` or `EVERY (INTERVAL '1 month')` — controlled by `exchange_partition_granularity`.
+- The partition DDL is taken from the `raw_partition` config parameter — written explicitly in `config()`. This gives full control over the initial partition range, step, and any Greenplum-specific partition options.
+- Further partitions are added on demand via `ALTER TABLE ... ADD PARTITION` as new periods appear in the staging data (controlled by `exchange_create_missing_partitions`).
 - Distribution: `DISTRIBUTED BY (<distributed_by>)` or `DISTRIBUTED RANDOMLY` if `distributed_by` is not set.
 
 On subsequent runs the check is idempotent — if the table already exists and is partitioned, creation is skipped.
@@ -288,11 +293,15 @@ models:
     schema='marts',
     materialized='incremental',
     incremental_strategy='exchange_partition',
-    exchange_partition_key='event_date',
-    exchange_stage_schema='stage',
+    partition_column='event_date',
+    raw_partition="""PARTITION BY RANGE (event_date) (
+        START (DATE '2026-01-01') INCLUSIVE
+        END   (DATE '2026-01-02') EXCLUSIVE
+        EVERY (INTERVAL '1 day')
+    )""",
+    exchange_swap_schema='stage',
     exchange_merge_partitions=false,
     exchange_partition_granularity='day',
-    exchange_initial_partition_start_at='2026-01-01',
     distributed_by='id',
     appendoptimized=true,
     orientation='column',
@@ -343,6 +352,7 @@ PARTITION BY RANGE (event_date) (
 -- CREATE TEMP TABLE orders__dbt_tmp AS ( <model SQL> ) DISTRIBUTED BY (id);
 
 -- For each period in delta:
+-- Column types are taken from model contract (schema.yml) — no DB round-trip needed
 CREATE TABLE stage.__swap_orders_20260101
 WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
 AS
@@ -377,8 +387,13 @@ ANALYZE marts.orders;
     schema='marts',
     materialized='incremental',
     incremental_strategy='exchange_partition',
-    exchange_partition_key='event_date',
-    exchange_stage_schema='stage',
+    partition_column='event_date',
+    raw_partition="""PARTITION BY RANGE (event_date) (
+        START (DATE '2026-01-01') INCLUSIVE
+        END   (DATE '2026-01-02') EXCLUSIVE
+        EVERY (INTERVAL '1 day')
+    )""",
+    exchange_swap_schema='stage',
     exchange_merge_partitions=true,
     unique_key=['id'],
     exchange_partition_granularity='day',
@@ -415,7 +430,7 @@ Generated SQL (incremental run, one partition period):
 CREATE TABLE stage.__swap_orders_20260101
 WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=2)
 AS
--- delta rows (always included, win on key conflict); cast to exact target types
+-- delta rows (always included, win on key conflict); cast to exact types from model contract (schema.yml)
 SELECT
   "id"::bigint AS "id",
   "event_date"::date AS "event_date",
@@ -465,11 +480,15 @@ ANALYZE marts.orders;
     schema='marts',
     materialized='incremental',
     incremental_strategy='exchange_partition',
-    exchange_partition_key='event_date',
-    exchange_stage_schema='stage',
+    partition_column='event_date',
+    raw_partition="""PARTITION BY RANGE (event_date) (
+        START (DATE '2026-01-01') INCLUSIVE
+        END   (DATE '2026-01-02') EXCLUSIVE
+        EVERY (INTERVAL '1 day')
+    )""",
+    exchange_swap_schema='stage',
     exchange_merge_partitions=false,
     exchange_partition_granularity='day',
-    exchange_initial_partition_start_at='2026-01-01',
     distributed_by='id'
   )
 }}
@@ -540,8 +559,13 @@ ANALYZE marts.orders;
     schema='marts',
     materialized='incremental',
     incremental_strategy='exchange_partition',
-    exchange_partition_key='event_date',
-    exchange_stage_schema='stage',
+    partition_column='event_date',
+    raw_partition="""PARTITION BY RANGE (event_date) (
+        START (DATE '2026-01-01') INCLUSIVE
+        END   (DATE '2026-01-02') EXCLUSIVE
+        EVERY (INTERVAL '1 day')
+    )""",
+    exchange_swap_schema='stage',
     exchange_merge_partitions=true,
     unique_key=['id'],
     exchange_partition_granularity='day',
@@ -570,7 +594,7 @@ Generated SQL (incremental run, one partition period):
 
 CREATE TABLE stage.__swap_orders_20260101
 AS
--- delta rows (always included, win on key conflict); cast to exact target types
+-- delta rows (always included, win on key conflict); cast to exact types from model contract (schema.yml)
 SELECT
   "id"::bigint AS "id",
   "event_date"::date AS "event_date",

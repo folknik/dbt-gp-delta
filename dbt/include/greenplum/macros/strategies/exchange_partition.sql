@@ -11,7 +11,7 @@
   Параметры макроса:
     staging_relation (опционально) — если передан, SQL модели не выполняется
       повторно: используется уже готовая таблица (temp-таблица postgres).
-      Если none — staging создаётся самостоятельно в exchange_stage_schema.
+      Если none — staging создаётся самостоятельно в exchange_swap_schema.
 
   Алгоритм:
     1. Читает конфигурацию модели и разрешает relation-объекты.
@@ -20,7 +20,7 @@
        Если таблица уже есть, но не партиционирована — выдаёт ошибку.
        (Создание таблицы на первом запуске выполняется в greenplum__create_table_as.)
     4. Если staging_relation не передан — материализует SQL модели
-       в staging-таблицу в exchange_stage_schema. Иначе — пропускает.
+       в staging-таблицу в exchange_swap_schema. Иначе — пропускает.
     5. Определяет диапазон дат (window) из staging-данных.
     6. Для каждого периода, за который staging содержит данные (DISTINCT по partition_key):
        a. При необходимости создаёт недостающую партицию в целевой таблице.
@@ -41,8 +41,9 @@
     — return({'relations': [...]})
 
   Обязательные параметры конфига модели:
-    exchange_partition_key      — колонка для партиционирования (тип DATE)
-    exchange_stage_schema       — схема для swap-таблиц
+    partition_column            — колонка для партиционирования (тип DATE)
+    raw_partition               — DDL секции PARTITION BY RANGE (...) (...)
+    exchange_swap_schema        — схема для swap-таблиц
     exchange_merge_partitions   — true (merge) / false (overwrite)
     contract: enforced: true    — типы колонок берутся из schema.yml
 
@@ -51,9 +52,6 @@
     exchange_create_missing_partitions  — создавать партиции автоматически (default: true)
     exchange_allow_with_validation      — использовать WITH VALIDATION при обмене (default: true)
     exchange_analyze                    — выполнять ANALYZE после обмена (default: true)
-    exchange_initial_partition_start_at — дата начала диапазона партиций при создании таблицы
-    exchange_initial_partition_end_at   — дата конца диапазона партиций при создании таблицы
-                                          (если не задана — создаётся одна партиция от start_at)
     unique_key                          — ключ дедупликации (обязателен в merge-режиме)
     distributed_by                      — колонка дистрибуции (RANDOMLY если не задана)
     appendoptimized, orientation, compresstype, compresslevel — параметры хранения AO-таблицы
@@ -72,7 +70,7 @@
   {# ------------------------------------------------------------------ #}
   {%- set target_relation    = this.incorporate(type='table') -%}
 
-  {%- set partition_key      = config.get('exchange_partition_key') -%}
+  {%- set partition_key      = config.get('partition_column') -%}
   {%- set granularity        = config.get('exchange_partition_granularity', 'day') | lower -%}
   {%- set without_validation = not config.get('exchange_allow_with_validation', true) -%}
   {%- set create_missing     = config.get('exchange_create_missing_partitions', true) -%}
@@ -81,11 +79,7 @@
   {%- set _unique_key        = config.get('unique_key', []) -%}
   {%- set merge_keys         = ([_unique_key] if _unique_key is string else _unique_key) -%}
   {%- set dist_key           = config.get('distributed_by', none) -%}
-  {%- set stage_schema       = config.get('exchange_stage_schema') -%}
-  {%- set initial_partition_start_at = config.get(
-        'exchange_initial_partition_start_at',
-        var('exchange_initial_partition_start_at', modules.datetime.datetime.now().strftime('%Y-01-01'))
-      ) -%}
+  {%- set stage_schema       = config.get('exchange_swap_schema') -%}
 
   {%- set _contract         = config.get('contract') -%}
   {%- set contract_enforced = _contract.enforced if (_contract is not none) else false -%}
@@ -100,13 +94,21 @@
   {# ------------------------------------------------------------------ #}
   {% if partition_key is none or partition_key == '' %}
     {{ exceptions.raise_compiler_error(
-        "exchange_partition: 'exchange_partition_key' is required in model config."
+        "exchange_partition: 'partition_column' is required in model config."
+    ) }}
+  {% endif %}
+
+  {% if config.get('raw_partition') is none and config.get('partition_type') is none %}
+    {{ exceptions.raise_compiler_error(
+        "exchange_partition: 'raw_partition' is required in model config. "
+        "Provide the full PARTITION BY RANGE (...) (...) clause so the target table "
+        "is created as a partitioned table on the first run."
     ) }}
   {% endif %}
 
   {% if stage_schema is none or stage_schema == '' %}
     {{ exceptions.raise_compiler_error(
-        "exchange_partition: 'exchange_stage_schema' is required in model config."
+        "exchange_partition: 'exchange_swap_schema' is required in model config."
     ) }}
   {% endif %}
 
@@ -162,7 +164,7 @@
   {#  SQL модели в этом случае уже выполнен, повторно не запускается.  #}
   {#                                                                    #}
   {#  Если staging_relation не передан — создаём его самостоятельно    #}
-  {#  в exchange_stage_schema под именем __stage_{model_name}.          #}
+  {#  в exchange_swap_schema под именем __stage_{model_name}.          #}
   {#  Перед созданием дропается если осталась с предыдущего запуска.   #}
   {# ------------------------------------------------------------------ #}
   {%- set staging_owned = staging_relation is none -%}
