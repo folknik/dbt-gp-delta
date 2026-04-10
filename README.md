@@ -258,6 +258,7 @@ On the first run dbt creates the partitioned target table and immediately loads 
 
 - Column definitions are taken from the **model contract** (`schema.yml` with `contract: enforced: true` and `data_type` on each column).
 - The partition DDL is taken from the `raw_partition` config parameter — written explicitly in `config()`. This gives full control over the initial partition range, step, and any Greenplum-specific partition options. Make sure `raw_partition` covers all periods present in the source data on the first run.
+- `partition_column` must be specified separately even though the column name already appears inside `raw_partition`. The strategy cannot parse `raw_partition` at runtime — it uses `partition_column` directly in SQL queries against the staging table (`date_trunc`, `MIN/MAX`, `DISTINCT`) on every subsequent run.
 - Further partitions are added on demand via `ALTER TABLE ... ADD PARTITION` as new periods appear in the staging data (controlled by `exchange_create_missing_partitions`).
 - Distribution: `DISTRIBUTED BY (<distributed_by>)` or `DISTRIBUTED RANDOMLY` if `distributed_by` is not set.
 
