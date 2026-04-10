@@ -132,17 +132,21 @@ When `merge_keys` match, **delta rows take priority** - target rows whose key ma
 Every run fully replaces all partitions that appear in the new data. Useful when the source already delivers a clean, complete snapshot for each period.
 
 ```sql
+{% set raw_partition %}
+PARTITION BY RANGE (transaction_date) (
+    START (DATE '2024-01-01') INCLUSIVE
+    END   (DATE '2024-02-01') EXCLUSIVE
+    EVERY (INTERVAL '1 day')
+)
+{% endset %}
+
 {{
     config(
         materialized='incremental',
         incremental_strategy='exchange_partition',
 
         partition_column='transaction_date',
-        raw_partition="""PARTITION BY RANGE (transaction_date) (
-            START (DATE '2024-01-01') INCLUSIVE
-            END   (DATE '2024-02-01') EXCLUSIVE
-            EVERY (INTERVAL '1 day')
-        )""",
+        raw_partition=raw_partition,
         exchange_partition_granularity='day',
         exchange_swap_schema='stage',
         exchange_merge_partitions=false,
@@ -187,17 +191,21 @@ models:
 New rows are merged with existing partition data. Rows matched by `unique_key` are replaced by the incoming version; unmatched existing rows are preserved.
 
 ```sql
+{% set raw_partition %}
+PARTITION BY RANGE (event_date) (
+    START (DATE '2024-01-01') INCLUSIVE
+    END   (DATE '2024-02-01') EXCLUSIVE
+    EVERY (INTERVAL '1 month')
+)
+{% endset %}
+
 {{
     config(
         materialized='incremental',
         incremental_strategy='exchange_partition',
 
         partition_column='event_date',
-        raw_partition="""PARTITION BY RANGE (event_date) (
-            START (DATE '2024-01-01') INCLUSIVE
-            END   (DATE '2024-02-01') EXCLUSIVE
-            EVERY (INTERVAL '1 month')
-        )""",
+        raw_partition=raw_partition,
         exchange_partition_granularity='month',
         exchange_swap_schema='stage',
         exchange_merge_partitions=true,
@@ -288,17 +296,21 @@ models:
 #### 1.1. Overwrite mode
 
 ```sql
+{% set raw_partition %}
+PARTITION BY RANGE (event_date) (
+    START (DATE '2026-01-01') INCLUSIVE
+    END   (DATE '2026-01-02') EXCLUSIVE
+    EVERY (INTERVAL '1 day')
+)
+{% endset %}
+
 {{
   config(
     schema='marts',
     materialized='incremental',
     incremental_strategy='exchange_partition',
     partition_column='event_date',
-    raw_partition="""PARTITION BY RANGE (event_date) (
-        START (DATE '2026-01-01') INCLUSIVE
-        END   (DATE '2026-01-02') EXCLUSIVE
-        EVERY (INTERVAL '1 day')
-    )""",
+    raw_partition=raw_partition,
     exchange_swap_schema='stage',
     exchange_merge_partitions=false,
     exchange_partition_granularity='day',
@@ -382,17 +394,21 @@ ANALYZE marts.orders;
 #### 1.2. Merge mode
 
 ```sql
+{% set raw_partition %}
+PARTITION BY RANGE (event_date) (
+    START (DATE '2026-01-01') INCLUSIVE
+    END   (DATE '2026-01-02') EXCLUSIVE
+    EVERY (INTERVAL '1 day')
+)
+{% endset %}
+
 {{
   config(
     schema='marts',
     materialized='incremental',
     incremental_strategy='exchange_partition',
     partition_column='event_date',
-    raw_partition="""PARTITION BY RANGE (event_date) (
-        START (DATE '2026-01-01') INCLUSIVE
-        END   (DATE '2026-01-02') EXCLUSIVE
-        EVERY (INTERVAL '1 day')
-    )""",
+    raw_partition=raw_partition,
     exchange_swap_schema='stage',
     exchange_merge_partitions=true,
     unique_key=['id'],
@@ -475,17 +491,21 @@ ANALYZE marts.orders;
 #### 2.1. Overwrite mode
 
 ```sql
+{% set raw_partition %}
+PARTITION BY RANGE (event_date) (
+    START (DATE '2026-01-01') INCLUSIVE
+    END   (DATE '2026-01-02') EXCLUSIVE
+    EVERY (INTERVAL '1 day')
+)
+{% endset %}
+
 {{
   config(
     schema='marts',
     materialized='incremental',
     incremental_strategy='exchange_partition',
     partition_column='event_date',
-    raw_partition="""PARTITION BY RANGE (event_date) (
-        START (DATE '2026-01-01') INCLUSIVE
-        END   (DATE '2026-01-02') EXCLUSIVE
-        EVERY (INTERVAL '1 day')
-    )""",
+    raw_partition=raw_partition,
     exchange_swap_schema='stage',
     exchange_merge_partitions=false,
     exchange_partition_granularity='day',
@@ -554,17 +574,21 @@ ANALYZE marts.orders;
 #### 2.2. Merge mode
 
 ```sql
+{% set raw_partition %}
+PARTITION BY RANGE (event_date) (
+    START (DATE '2026-01-01') INCLUSIVE
+    END   (DATE '2026-01-02') EXCLUSIVE
+    EVERY (INTERVAL '1 day')
+)
+{% endset %}
+
 {{
   config(
     schema='marts',
     materialized='incremental',
     incremental_strategy='exchange_partition',
     partition_column='event_date',
-    raw_partition="""PARTITION BY RANGE (event_date) (
-        START (DATE '2026-01-01') INCLUSIVE
-        END   (DATE '2026-01-02') EXCLUSIVE
-        EVERY (INTERVAL '1 day')
-    )""",
+    raw_partition=raw_partition,
     exchange_swap_schema='stage',
     exchange_merge_partitions=true,
     unique_key=['id'],
