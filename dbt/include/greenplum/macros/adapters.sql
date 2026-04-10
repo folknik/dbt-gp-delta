@@ -55,14 +55,9 @@
     ;
 
     {# INSERTING DATA #}
-    {# For exchange_partition strategy: skip INSERT on initial creation — the table is
-       created empty, and data will be loaded by the exchange_partition strategy
-       on subsequent incremental runs. #}
-    {%- if config.get('incremental_strategy') != 'exchange_partition' -%}
     insert into {{ relation }} (
         {{ sql }}
     );
-    {%- endif -%}
 
   {% else %}
 

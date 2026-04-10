@@ -26,7 +26,7 @@ Easiest way to start use dbt-greenplum is to install it using pip
 Where `<version>` is same as your dbt version
 
 Available versions:
- - 1.1.0
+ - 1.2.0
 
 ## `exchange_partition` incremental strategy
 
@@ -34,7 +34,7 @@ The `exchange_partition` strategy implements atomic, partition-level incremental
 
 #### How it works
 
-> **First run vs subsequent runs.** On the very first run (target table does not exist), dbt only creates an empty partitioned table — no data is loaded. Data loading starts from the second run, when the target table already exists and the strategy kicks in. This is standard behaviour for the `exchange_partition` strategy: the first run initialises the table structure, all subsequent runs load data incrementally by window.
+> **First run.** On the very first run (target table does not exist), dbt creates the partitioned table and immediately loads all data via `INSERT INTO`. The `raw_partition` config must define a range wide enough to cover all rows returned by the model SQL on the first run — otherwise Greenplum will raise `no partition for partitioning key`. On subsequent runs the strategy takes over and loads data partition-by-partition via `EXCHANGE PARTITION`.
 
 ##### Overwrite mode (default, `exchange_merge_partitions=false`)
 
@@ -42,7 +42,8 @@ The `exchange_partition` strategy implements atomic, partition-level incremental
 Run 1 — target does not exist:
     └── CREATE TABLE target  (columns from model contract in schema.yml,
                                partition DDL from raw_partition config)
-        target table is left empty
+        INSERT INTO target ( <model SQL> )   ← all data loaded immediately
+        raw_partition must cover all rows returned on this run
 
 Run 2+ — target exists:
     │
@@ -74,7 +75,8 @@ The target partition is **fully replaced** with data from the delta.
 Run 1 — target does not exist:
     └── CREATE TABLE target  (columns from model contract in schema.yml,
                                partition DDL from raw_partition config)
-        target table is left empty
+        INSERT INTO target ( <model SQL> )   ← all data loaded immediately
+        raw_partition must cover all rows returned on this run
 
 Run 2+ — target exists:
     │
@@ -245,10 +247,11 @@ The staging table is a standard dbt temp table — created automatically before 
 
 ## Auto-creation of the partitioned table
 
-On the first run the strategy automatically creates the target table as a `PARTITION BY RANGE` table — in both overwrite and merge modes:
+On the first run dbt creates the target table and immediately loads all data into it — in one step:
 
 - Column definitions are taken from the **model contract** (`schema.yml` with `contract: enforced: true` and `data_type` on each column).
 - The partition DDL is taken from the `raw_partition` config parameter — written explicitly in `config()`. This gives full control over the initial partition range, step, and any Greenplum-specific partition options.
+- Data is inserted via `INSERT INTO target (model SQL)`. The `raw_partition` range must be wide enough to cover all rows returned by the model SQL on the first run. If any row falls outside the defined partitions, Greenplum will raise `no partition for partitioning key`.
 - Further partitions are added on demand via `ALTER TABLE ... ADD PARTITION` as new periods appear in the staging data (controlled by `exchange_create_missing_partitions`).
 - Distribution: `DISTRIBUTED BY (<distributed_by>)` or `DISTRIBUTED RANDOMLY` if `distributed_by` is not set.
 
