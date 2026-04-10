@@ -16,7 +16,6 @@
   {% set partition_spec = config.get('partition_spec', none) %}
 
   {%- set raw_partition = config.get('raw_partition', none) -%}
-  {%- set fields_string = config.get('fields_string', none) -%}
 
   {%- set default_partition_name = config.get('default_partition_name', default='other') -%}
   {%- set partition_type = config.get('partition_type', none) -%}
@@ -32,32 +31,26 @@
 
   {% if is_partition and not temporary %}
 
-    {# CREATING TABLE #}
-    {%- if contract_enforced -%}
-      {# contract path: колонки из schema.yml, storage без жёстких дефолтов #}
-      {{ get_assert_columns_equivalent(sql) }}
-      {%- set _fields_ddl    = get_table_columns_and_constraints() -%}
-      {%- set _storage_clause = gp_build_storage_clause() -%}
-      {%- set _dist_clause    = gp_build_distribution_clause() -%}
+    {%- if not contract_enforced -%}
+      {{ exceptions.raise_fail_fast_error("Model contract enforced is needed to create table with partitions!") }}
     {%- else -%}
-      {# стандартный путь dbt-gp: fields_string из конфига #}
-      {%- set _fields_ddl    = '(' ~ fields_string ~ ')' -%}
-      {%- set _storage_clause = storage_parameters(appendoptimized, blocksize, orientation, compresstype, compresslevel) -%}
-      {%- set _dist_clause    = distribution(distributed_by, distributed_replicated) -%}
-    {%- endif -%}
-    create table if not exists {{ relation }}
-    {{ _fields_ddl }}
-    {{ _storage_clause }}
-    {{ _dist_clause }}
-    {{ partitions(raw_partition, partition_type, partition_column,
-                  default_partition_name, partition_start, partition_end,
-                  partition_every, partition_values) }}
-    ;
+      {{ get_assert_columns_equivalent(sql) }}
+      create table if not exists {{ relation }}
+      {{ get_table_columns_and_constraints() }}
+      {{ storage_parameters(appendoptimized, blocksize, orientation, compresstype, compresslevel) }}
+      {{ distribution(distributed_by, distributed_replicated) }}
+      {{ partitions(raw_partition, partition_type, partition_column,
+                    default_partition_name, partition_start, partition_end,
+                    partition_every, partition_values) }}
+      ;
 
-    {# INSERTING DATA #}
-    insert into {{ relation }} (
-        {{ sql }}
-    );
+      {{ add_greenplum_comments(relation) }}
+
+      {# INSERTING DATA #}
+      insert into {{ relation }} (
+          {{ sql }}
+      );
+    {%- endif -%}
 
   {% else %}
 
@@ -66,14 +59,36 @@
       {%- elif unlogged -%}
         unlogged
       {%- endif %} table {{ relation }}
-      {% if not temporary %}
-      {{ storage_parameters(appendoptimized, blocksize, orientation, compresstype, compresslevel) }}
-      {% endif %}
-      as (
+      {%- if contract_enforced -%}
+        {{ get_assert_columns_equivalent(sql) }}
+      {%- endif -%}
+      {%- if contract_enforced and not temporary -%}
+
+        {{ get_table_columns_and_constraints() }}
+        {{ storage_parameters(appendoptimized, blocksize, orientation, compresstype, compresslevel) }}
+        {{ distribution(distributed_by, distributed_replicated) }};
+        {{ add_greenplum_comments(relation) }}
+        insert into {{ relation }} (
+          {{ adapter.dispatch('get_column_names', 'dbt')() }}
+        )
+        {%- set sql = get_select_subquery(sql) %}
+
+      {%- else %}
+        {% if not temporary %}
+        {{ storage_parameters(appendoptimized, blocksize, orientation, compresstype, compresslevel) }}
+        {% endif %}
+        as
+      {%- endif %}
+      (
         {{ sql }}
       )
-      {{ distribution(distributed_by, distributed_replicated) }}
+      {%- if not contract_enforced or temporary -%}
+        {{ distribution(distributed_by, distributed_replicated) }}
+      {%- endif -%}
       ;
+      {%- if not temporary and not contract_enforced %}
+        {{ add_greenplum_comments(relation) }}
+      {%- endif %}
   {% endif %}
 
 {%- endmacro %}
@@ -148,6 +163,32 @@
 {% macro greenplum__make_temp_relation(base_relation, suffix) %}
    {{ return(postgres__make_temp_relation(base_relation, suffix)) }}
 {% endmacro %}
+
+
+{% macro add_greenplum_comments(relation) %}
+  {%- if model and model.description is defined -%}
+    {# Используем текущий контекст модели, если доступен #}
+
+    {# Комментарий к таблице #}
+    {%- if model.description -%}
+      comment on table {{ relation }} is '{{ model.description | replace("'", "''") | trim }}';
+    {%- endif -%}
+
+    {# Комментарии к колонкам #}
+    {%- if model.columns is defined -%}
+      {%- for column_name in model.columns -%}
+        {%- set column_config = model.columns[column_name] -%}
+        {%- if column_config.description is defined and column_config.description -%}
+          comment on column {{ relation }}.{{ adapter.quote(column_name) }} is '{{ column_config.description | replace("'", "''") | trim }}';
+        {%- endif -%}
+      {%- endfor -%}
+    {%- endif -%}
+
+    {{ log("Added comments using current model context for: " ~ relation.name, info=true) }}
+  {%- else -%}
+    {{ log("Model context not available for comments on: " ~ relation.name, info=true) }}
+  {%- endif -%}
+{%- endmacro %}
 
 
 {% macro greenplum_escape_comment(comment) -%}

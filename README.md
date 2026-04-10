@@ -26,7 +26,7 @@ Easiest way to start use dbt-greenplum is to install it using pip
 Where `<version>` is same as your dbt version
 
 Available versions:
- - 1.3.0
+ - 1.4.0
 
 ## `exchange_partition` incremental strategy
 
@@ -121,11 +121,11 @@ When `merge_keys` match, **delta rows take priority** - target rows whose key ma
 | `exchange_allow_with_validation` | bool | `true` | When `true`, Greenplum validates that the swap table data satisfies the partition constraints during `EXCHANGE PARTITION`. Set to `false` to skip validation for faster exchange — use only when data correctness is guaranteed upstream. |
 | `exchange_analyze` | bool | `true` | Run `ANALYZE` on the target table after all partitions are exchanged. |
 | `distributed_by` | string | `RANDOMLY` | Distribution key(s) for the target table, e.g. `'id'` or `'tenant_id, id'`. |
-| `appendoptimized` | bool | — | Create an append-optimised (AO) table. |
-| `orientation` | string | — | `'column'` or `'row'`. Applies only when `appendoptimized=true`. |
-| `compresstype` | string | — | Compression algorithm, e.g. `'ZSTD'`, `'ZLIB'`. Applies only when `appendoptimized=true`. |
-| `compresslevel` | int | — | Compression level (0–9). Applies only when `appendoptimized=true`. |
-| `blocksize` | int | — | Block size in bytes. Applies only when `appendoptimized=true`. |
+| `appendoptimized` | bool | `true` | Create an append-optimised (AO) table. Set to `false` to create a heap table. |
+| `orientation` | string | `'column'` | `'column'` or `'row'`. Applies only when `appendoptimized=true`. |
+| `compresstype` | string | `'ZSTD'` | Compression algorithm, e.g. `'ZSTD'`, `'ZLIB'`. Applies only when `appendoptimized=true`. |
+| `compresslevel` | int | `4` | Compression level (0–9). Applies only when `appendoptimized=true`. |
+| `blocksize` | int | `32768` | Block size in bytes. Applies only when `appendoptimized=true`. |
 
 #### Overwrite mode example
 
@@ -239,6 +239,7 @@ where event_date >= date_trunc('month', current_date - interval '1 month')
 - The staging table is a standard dbt temporary table created by the incremental materialization before the strategy is called. It lives in the session temp schema and is dropped automatically at the end of the session. It is **not** created in `exchange_swap_schema`.
 - `WITHOUT VALIDATION` (`exchange_allow_with_validation=false`) skips Greenplum's constraint check during the exchange. Use it only when you are certain the swap table data satisfies the partition constraints.
 - The strategy processes only partition periods that are **actually present in the staging data**. Periods with no new data are never touched, so existing partition data for those periods is preserved as-is.
+- If `description` is set on the model or its columns in `schema.yml`, `COMMENT ON TABLE` / `COMMENT ON COLUMN` statements are automatically emitted after table creation.
 
 ## Table naming
 
@@ -523,7 +524,8 @@ PARTITION BY RANGE (event_date) (
     exchange_swap_schema='stage',
     exchange_merge_partitions=false,
     exchange_partition_granularity='day',
-    distributed_by='id'
+    distributed_by='id',
+    appendoptimized=false
   )
 }}
 
@@ -550,6 +552,7 @@ CREATE TABLE marts.orders (
   "amount" numeric(18,4),
   "loaded_at" timestamp
 )
+WITH (appendoptimized=false)
 DISTRIBUTED BY (id)
 PARTITION BY RANGE (event_date) (
     START (DATE '2026-01-01') INCLUSIVE
@@ -621,7 +624,8 @@ PARTITION BY RANGE (event_date) (
     exchange_merge_partitions=true,
     unique_key=['id'],
     exchange_partition_granularity='day',
-    distributed_by='id'
+    distributed_by='id',
+    appendoptimized=false
   )
 }}
 
