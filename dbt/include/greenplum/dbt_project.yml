@@ -1,5 +1,5 @@
 config-version: 2
 name: dbt_gp_delta
-version: 1.4.0
+version: 1.5.0
 
 macro-paths: ["macros"]

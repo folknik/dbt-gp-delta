@@ -35,21 +35,28 @@
       {{ exceptions.raise_fail_fast_error("Model contract enforced is needed to create table with partitions!") }}
     {%- else -%}
       {{ get_assert_columns_equivalent(sql) }}
-      create table if not exists {{ relation }}
-      {{ get_table_columns_and_constraints() }}
-      {{ storage_parameters(appendoptimized, blocksize, orientation, compresstype, compresslevel) }}
-      {{ distribution(distributed_by, distributed_replicated) }}
-      {{ partitions(raw_partition, partition_type, partition_column,
-                    default_partition_name, partition_start, partition_end,
-                    partition_every, partition_values) }}
-      ;
+
+      {# CREATING TABLE — отдельный statement, т.к. Greenplum не поддерживает DDL+DML в одном execute() #}
+      {% call statement('create_partitioned_table') %}
+        create table if not exists {{ relation }}
+        {{ get_table_columns_and_constraints() }}
+        {{ storage_parameters(appendoptimized, blocksize, orientation, compresstype, compresslevel) }}
+        {{ distribution(distributed_by, distributed_replicated) }}
+        {{ partitions(raw_partition, partition_type, partition_column,
+                      default_partition_name, partition_start, partition_end,
+                      partition_every, partition_values) }}
+      {% endcall %}
 
       {{ add_greenplum_comments(relation) }}
 
-      {# INSERTING DATA #}
-      insert into {{ relation }} (
-          {{ sql }}
-      );
+      {# INSERTING DATA — отдельный statement #}
+      {% call statement('insert_into_partitioned_table') %}
+        insert into {{ relation }} (
+            {{ sql }}
+        )
+      {% endcall %}
+
+      SELECT 1
     {%- endif -%}
 
   {% else %}

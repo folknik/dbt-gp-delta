@@ -26,7 +26,7 @@ Easiest way to start use dbt-greenplum is to install it using pip
 Where `<version>` is same as your dbt version
 
 Available versions:
- - 1.4.0
+ - 1.5.0
 
 ## `exchange_partition` incremental strategy
 
@@ -234,7 +234,7 @@ where event_date >= date_trunc('month', current_date - interval '1 month')
 
 - The target table **must be a range-partitioned table**. If a non-partitioned table with the same name already exists, the strategy raises a compile-time error. Drop it manually before the first run.
 - `exchange_swap_schema` must exist in the database before the first run. The strategy does not create it automatically.
-- `raw_partition` must be provided explicitly in `config()`. There is no auto-generation of the partition DDL.
+- `raw_partition` must be provided explicitly in `config()`. There is no auto-generation of the partition DDL. On the first run the full model SQL is executed without an `is_incremental()` filter — **`raw_partition` must cover all date periods present in the source data at that moment**, otherwise Greenplum will raise `no partition for partitioning key`.
 - Swap tables are named `__swap_{model_name}_{YYYYMMDD}` (day) or `__swap_{model_name}_{YYYYMM}` (month) and are always dropped after a successful exchange. If a run is interrupted they will be cleaned up on the next run. **Model name must not exceed 47 characters** (day granularity) or **49 characters** (month granularity) — Greenplum enforces a 63-character limit on identifiers, and the swap table name prefix `__swap_` (7 chars) plus date suffix `_YYYYMMDD` (9 chars) or `_YYYYMM` (7 chars) consumes the rest.
 - The staging table is a standard dbt temporary table created by the incremental materialization before the strategy is called. It lives in the session temp schema and is dropped automatically at the end of the session. It is **not** created in `exchange_swap_schema`.
 - `WITHOUT VALIDATION` (`exchange_allow_with_validation=false`) skips Greenplum's constraint check during the exchange. Use it only when you are certain the swap table data satisfies the partition constraints.
